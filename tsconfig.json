@@ -66,6 +66,9 @@
             ],
             "@illegalcordplugins/*": [
                 "./src/illegalcordplugins/*"
+            ],
+            "@testcordplugins/*": [
+                "./src/userplugins/*"
             ]
         },
         "plugins": [
