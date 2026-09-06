@@ -21,7 +21,7 @@ interface ProtectedText {
     values: string[];
 }
 
-const PROTECTED_PATTERN = /```[\s\S]*?```|`[^`\n]*`|https?:\/\/[^\s<]+|www\.[^\s<]+|<a?:[a-z0-9_]{2,}:\d+>|<[@#&]!?[0-9]+>|@everyone|@here/g;
+const PROTECTED_PATTERN = /```[\s\S]*?```|`[^`\n]*`|https?:\/\/[^\s<>]+|www\.[^\s<>]+|<a?:[a-zA-Z0-9_]{2,}:\d+>|<[@#&]!?[0-9]+>|@everyone|@here/g;
 const PROTECTED_RESTORE_PATTERN = /__OPSEC_PROTECTED_(\d+)__/g;
 const WORD_PATTERN = /[A-Za-z]{5,16}/g;
 const WORD_BOUNDARY = "A-Za-zÀ-ÿ0-9_";
