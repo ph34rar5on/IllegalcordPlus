@@ -106,6 +106,14 @@ const settings = definePluginSettings({
             { label: t("Image + Voice"), value: "video" }
         ]
     },
+    captureTarget: {
+        type: OptionType.SELECT,
+        description: t("Capture Source"),
+        options: [
+            { label: t("Discord Window Only"), value: "window", default: true },
+            { label: t("Entire Screen"), value: "screen" }
+        ]
+    },
     videoQuality: {
         type: OptionType.SELECT,
         description: t("Video Quality"),
@@ -304,6 +312,7 @@ async function handleVoiceChannelSelect(e: any) {
         } else {
             await startRecording({
                 mode: settings.store.mode as any,
+                captureTarget: settings.store.captureTarget as any,
                 videoQuality: settings.store.videoQuality as any,
                 videoFormat: settings.store.videoFormat as any,
                 audioFormat: settings.store.audioFormat as any,
@@ -335,6 +344,7 @@ export default definePlugin({
             } else {
                 startRecording({
                     mode: settings.store.mode as any,
+                    captureTarget: settings.store.captureTarget as any,
                     videoQuality: settings.store.videoQuality as any,
                     videoFormat: settings.store.videoFormat as any,
                     audioFormat: settings.store.audioFormat as any,

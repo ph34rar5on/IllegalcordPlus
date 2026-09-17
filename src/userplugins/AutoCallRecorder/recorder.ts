@@ -11,6 +11,7 @@ import { fixMp4Duration, fixWebmBufferDuration } from "./mediaFixer";
 
 export interface RecordingOptions {
     mode: "voice" | "video";
+    captureTarget?: "window" | "screen";
     videoQuality?: string;
     videoFormat?: string;
     audioFormat?: string;
@@ -202,9 +203,11 @@ export async function startRecording(opts: RecordingOptions): Promise<boolean> {
         // 2. Capture desktop system audio / video loopback
         try {
             let desktopSourceId: string | null = null;
-            const nativeCapture = (window as any).VencordNative?.desktopCapture;
-            if (nativeCapture?.getSources) {
-                const sources = await nativeCapture.getSources();
+            if (opts.captureTarget !== "screen" && native?.getWindowSourceId) {
+                desktopSourceId = await native.getWindowSourceId();
+            }
+            if (!desktopSourceId && native?.getDesktopSources) {
+                const sources = await native.getDesktopSources();
                 const screenSource = sources.find((s: any) => s.id?.startsWith("screen:"));
                 if (screenSource) desktopSourceId = screenSource.id;
             }

@@ -8,7 +8,7 @@ import { createWriteStream, WriteStream } from "node:fs";
 import { copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
-import { app, dialog, IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, desktopCapturer, dialog, IpcMainInvokeEvent } from "electron";
 
 // Polyfill FileReader side-effect for Node.js main process environment
 if (typeof globalThis.FileReader === "undefined") {
@@ -50,6 +50,36 @@ function getDefaultSaveFolder(): string {
         if (docs && docs.trim()) return docs.trim();
     } catch { }
     return process.cwd();
+}
+
+/**
+ * Lists available desktop capture sources (screens) via Electron's desktopCapturer.
+ * Only serializable fields (id, name) are returned since thumbnails/NativeImage
+ * can't cross the IPC boundary.
+ */
+export async function getDesktopSources(_event: IpcMainInvokeEvent): Promise<Array<{ id: string; name: string; }>> {
+    try {
+        const sources = await desktopCapturer.getSources({ types: ["screen"] });
+        return sources.map(s => ({ id: s.id, name: s.name }));
+    } catch (e) {
+        console.error("[AutoCallRecorder] Failed to get desktop sources:", e);
+        return [];
+    }
+}
+
+/**
+ * Returns a media source id that identifies the Discord window itself, so it
+ * can be captured directly via getUserMedia without needing to search through
+ * desktopCapturer's window/screen list (which drags in the whole monitor).
+ */
+export async function getWindowSourceId(event: IpcMainInvokeEvent): Promise<string | null> {
+    try {
+        const win = BrowserWindow.fromWebContents(event.sender);
+        return win?.getMediaSourceId() ?? null;
+    } catch (e) {
+        console.error("[AutoCallRecorder] Failed to get window source id:", e);
+        return null;
+    }
 }
 
 /**
