@@ -6,6 +6,7 @@
 
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
+import ErrorBoundary from "@components/ErrorBoundary";
 import { EquicordDevs } from "@utils/constants";
 import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType } from "@utils/types";
@@ -22,8 +23,10 @@ import {
     React,
     Toasts,
     UserStore,
+    useStateFromStores,
     VoiceStateStore,
 } from "@webpack/common";
+import type { ReactNode } from "react";
 
 const SelectedChannelStore = findStoreLazy("SelectedChannelStore");
 const logger = new Logger("StaffDetector");
@@ -339,6 +342,28 @@ const permChecks = [
     ["deafenMembersPermission", "DEAFEN_MEMBERS"],
 ] satisfies Array<[StaffPermissionSetting, PermissionBitName]>;
 
+const VOICE_NAME_SETTINGS_KEYS = [
+    "userIncludeIds", "userExcludeIds", "serverFilterMode", "serverIncludeIds", "serverExcludeIds",
+    ...permChecks.map(([key]) => key)
+] satisfies Array<keyof typeof settings.def>;
+
+interface VoiceNameProps {
+    user: { id: string; };
+    guildId?: string;
+    children: ReactNode;
+}
+
+const StaffVoiceName = ErrorBoundary.wrap(({ user, guildId, children }: VoiceNameProps) => {
+    const options = settings.use(VOICE_NAME_SETTINGS_KEYS);
+    const isStaff = useStateFromStores(
+        [GuildStore, GuildRoleStore, GuildMemberStore],
+        () => Boolean(guildId && shouldFlag(user.id, guildId, getStaffRoleIds(guildId))),
+        [user.id, guildId, ...VOICE_NAME_SETTINGS_KEYS.map(key => options[key])]
+    );
+
+    return isStaff ? <span style={{ color: "var(--status-danger)" }}>{children}</span> : <>{children}</>;
+}, { noop: true });
+
 function parseIdSet(raw: string): Set<string> {
     if (!raw) return emptyIdSet;
 
@@ -410,7 +435,6 @@ function isUserStaff(userId: string, guildId: string, staffRoleIds: Set<string>)
 
     const member = GuildMemberStore.getMember(guildId, userId);
     if (!member?.roles?.length) {
-        if (settings.store.enableLogs) logger.info(`StaffDetector: no roles for ${userId} in ${guildId}`);
         return false;
     }
 
@@ -647,13 +671,25 @@ function scanChannelStaff(channelId: string, isInit: boolean): void {
 
 export default definePlugin({
     name: "StaffDetector",
-    description: "Alerts (toast/notification + sound) when staff join or leave your VC.",
+    description: "Highlights staff names in red in voice channels and alerts when staff join or leave your voice channel.",
     tags: ["Servers", "Utility"],
     authors: [
         EquicordDevs.irritably,
         EquicordDevs.zFrxncesck1,
     ],
     settings,
+
+    patches: [{
+        find: "#{intl::GUEST_NAME_SUFFIX})]",
+        replacement: {
+            match: /(?<=children:\[)\i(?:\?\?\i\.\i\.getName\(\i\))?(?=,.{0,150}?#{intl::GUEST_NAME_SUFFIX})/,
+            replace: "$self.renderVoiceName(arguments[0],$&)"
+        }
+    }],
+
+    renderVoiceName(props: Omit<VoiceNameProps, "children">, children: ReactNode) {
+        return <StaffVoiceName {...props}>{children}</StaffVoiceName>;
+    },
 
     start() {
         const vcId: string | null = SelectedChannelStore.getVoiceChannelId?.() ?? null;

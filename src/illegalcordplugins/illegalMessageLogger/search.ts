@@ -14,13 +14,16 @@ interface SearchTerm {
     negated: boolean;
 }
 
+const SEARCH_KEYS = new Set(["from", "user", "channel", "in", "guild", "server", "id", "message", "before", "after", "has", "is", "text", "content"]);
+
 function parseSearch(query: string): SearchTerm[] {
-    return (query.match(/(?:-?[\w-]+:)?"[^"]*"|-?\S+/g) ?? []).map(rawTerm => {
+    return (query.match(/-?(?:[\w-]+:)?(?:"[^"]*"|\S+)/g) ?? []).map(rawTerm => {
         const negated = rawTerm.startsWith("-");
-        const term = (negated ? rawTerm.slice(1) : rawTerm).replace(/^"|"$/g, "");
+        const raw = negated ? rawTerm.slice(1) : rawTerm;
+        const term = raw.replace(/^"|"$/g, "");
         const separator = term.indexOf(":");
 
-        return separator === -1
+        return raw.startsWith('"') || separator === -1 || !SEARCH_KEYS.has(term.slice(0, separator).toLowerCase())
             ? { key: "text", value: term.toLowerCase(), negated }
             : { key: term.slice(0, separator).toLowerCase(), value: term.slice(separator + 1).replace(/^"|"$/g, "").toLowerCase(), negated };
     }).filter(term => term.value.length > 0);
@@ -28,25 +31,14 @@ function parseSearch(query: string): SearchTerm[] {
 
 export function createSearchMatcher(query: string) {
     const terms = parseSearch(query.trim());
-    const channelNames = new Map<string, string>();
-    const guildNames = new Map<string, string>();
 
     return (record: LogRecord) => {
         const { message } = record;
         const authorName = message.author.global_name ?? message.author.globalName ?? message.author.username;
         const guildId = message.guild_id ?? message.guildId ?? ChannelStore.getChannel(message.channel_id)?.guild_id;
 
-        let channelName = channelNames.get(message.channel_id);
-        if (channelName === undefined) {
-            channelName = ChannelStore.getChannel(message.channel_id)?.name?.toLowerCase() ?? "";
-            channelNames.set(message.channel_id, channelName);
-        }
-
-        let guildName = guildNames.get(guildId ?? "");
-        if (guildName === undefined) {
-            guildName = GuildStore.getGuild(guildId)?.name.toLowerCase() ?? "";
-            guildNames.set(guildId ?? "", guildName);
-        }
+        const channelName = ChannelStore.getChannel(message.channel_id)?.name?.toLowerCase() ?? "";
+        const guildName = GuildStore.getGuild(guildId)?.name.toLowerCase() ?? "";
 
         return terms.every(term => {
             const { value } = term;
@@ -55,7 +47,7 @@ export function createSearchMatcher(query: string) {
             switch (term.key) {
                 case "from":
                 case "user":
-                    matches = message.author.id === value || authorName.toLowerCase().includes(value);
+                    matches = message.author.id === value || authorName.toLowerCase().includes(value) || message.author.username.toLowerCase().includes(value);
                     break;
                 case "channel":
                 case "in":
@@ -93,7 +85,8 @@ export function createSearchMatcher(query: string) {
                     break;
                 case "text":
                 case "content":
-                    matches = [message.content, authorName, channelName, guildName, message.id]
+                    matches = [message.content, authorName, message.author.username, channelName, guildName, message.id,
+                        message.author.id, message.channel_id, guildId ?? "", ...(message.editHistory?.map(edit => edit.content) ?? [])]
                         .some(candidate => candidate.toLowerCase().includes(value));
                     break;
                 default:

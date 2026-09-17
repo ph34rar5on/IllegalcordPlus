@@ -6,6 +6,7 @@
 
 import { ApplicationCommandInputType } from "@api/Commands";
 import { importSettings } from "@api/SettingsSync/offline";
+import { Heading } from "@components/Heading";
 import { Paragraph } from "@components/Paragraph";
 import { EquicordDevs } from "@utils/constants";
 import { Logger } from "@utils/Logger";
@@ -173,6 +174,47 @@ export default definePlugin({
     authors: [EquicordDevs.irritably],
     tags: ["Chat", "Privacy", "Utility"],
     dependencies: ["CommandsAPI", "MessagePopoverAPI"],
+
+    settingsAboutComponent() {
+        return (
+            <>
+                <Heading tag="h3">How ShareClientConfig works</Heading>
+                <Paragraph>
+                    Share your Illegalcord and plugin settings through a chat attachment.
+                    ShareClientConfig must be enabled in each client to create or apply a configuration.
+                </Paragraph>
+                <Heading tag="h4">1. Share your configuration</Heading>
+                <Paragraph>
+                    Open the chat you want to share in and run <code>/share-config</code>.
+                    The plugin prepares <code>{FILE_NAME}</code> and opens the Discord upload dialog.
+                    You confirm sending the attachment yourself. The command does not send the message automatically.
+                    The maximum file size is 5 MiB.
+                </Paragraph>
+                <Heading tag="h4">2. Apply a shared configuration</Heading>
+                <Paragraph>
+                    Hover over the message containing <code>{FILE_NAME}</code> and click
+                    {" "}<strong>Apply Illegalcord configuration</strong> in the message action bar.
+                    Confirm with <strong>Apply</strong>, wait for the success message, then restart Illegalcord.
+                    Keep the original attachment filename so the plugin can recognize it.
+                </Paragraph>
+                <Heading tag="h4">3. What changes in your client</Heading>
+                <Paragraph>
+                    Values in the file replace the corresponding settings, including which plugins are enabled.
+                    Settings absent from the file stay unchanged. Missing plugins are not installed, and QuickCSS,
+                    theme files, and data stored separately by plugins are not transferred.
+                    You can save a backup from the Illegalcord settings before applying a configuration.
+                </Paragraph>
+                <Heading tag="h4">4. Which data is excluded</Heading>
+                <Paragraph>
+                    The plugin filters fields recognized as sensitive, such as API keys, tokens, passwords, and webhooks.
+                    It also excludes selected private settings, cloud configuration, and theme lists.
+                    Filtering also runs during import, so excluded values do not replace your local ones.
+                    Detection relies on field names and known patterns and cannot guarantee that every personal detail is found.
+                    Review the file contents before sharing it.
+                </Paragraph>
+            </>
+        );
+    },
 
     commands: [{
         name: "share-config",

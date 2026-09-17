@@ -6,12 +6,15 @@
 
 import { ChatBarButton, ChatBarButtonFactory } from "@api/ChatButtons";
 import { sendBotMessage } from "@api/Commands";
-import { addMessagePreSendListener, MessageSendListener, removeMessagePreSendListener } from "@api/MessageEvents";
+import type { MessageObject } from "@api/MessageEvents";
 import { definePluginSettings } from "@api/Settings";
+import ErrorBoundary from "@components/ErrorBoundary";
+import { Paragraph } from "@components/Paragraph";
 import { EquicordDevs } from "@utils/constants";
 import { Logger } from "@utils/Logger";
 import definePlugin, { IconComponent, OptionType } from "@utils/types";
 import { Message } from "@vencord/discord-types";
+import { MessageStore } from "@webpack/common";
 
 interface IMessageCreate {
     type: "MESSAGE_CREATE";
@@ -25,6 +28,8 @@ const SECURITY_CONSTANTS = {
     DEFAULT_MIN_PASSWORD_LENGTH: 12,
     MAX_PASSWORD_LENGTH: 128,
     LEGACY_PBKDF2_ITERATIONS: 200000,
+    MAX_PBKDF2_ITERATIONS: 600000,
+    GCM_TAG_LENGTH: 16,
     SALT_LENGTH: 32,
     IV_LENGTH: 12,
     ITERATION_LENGTH: 4,
@@ -42,11 +47,11 @@ const logger = new Logger("Securecord");
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const specialCharacterPattern = /[^A-Za-z0-9]/;
+const CHAT_BAR_SETTING_KEYS = ["enableEncryption", "autoLocked"] satisfies Array<"enableEncryption" | "autoLocked">;
 
 let failedAttempts = 0;
 let lockoutEndTime = 0;
 let lastDecryptionAttempt = 0;
-let messageSendListener: MessageSendListener | null = null;
 let autoLockTimer: ReturnType<typeof setTimeout> | null = null;
 let lastActivityChannelId: string | null = null;
 
@@ -142,7 +147,7 @@ function getErrorMessage(error: unknown): string {
 
 function getPbkdf2Iterations(): number {
     const iterations = Number(settings.store.pbkdf2Iterations);
-    return Number.isFinite(iterations) && iterations > 0
+    return Number.isInteger(iterations) && iterations > 0 && iterations <= SECURITY_CONSTANTS.MAX_PBKDF2_ITERATIONS
         ? iterations
         : SECURITY_CONSTANTS.LEGACY_PBKDF2_ITERATIONS;
 }
@@ -299,8 +304,11 @@ async function encryptAES(text: string, password: string): Promise<string> {
 }
 
 async function decryptAES(encrypted: string, password: string): Promise<string> {
+    if (encrypted.length > SECURITY_CONSTANTS.MAX_DISCORD_MESSAGE_LENGTH) {
+        throw new Error("Encrypted message is too large.");
+    }
     const data = base64ToBytes(encrypted);
-    const minLegacyLength = 1 + SECURITY_CONSTANTS.SALT_LENGTH + SECURITY_CONSTANTS.IV_LENGTH;
+    const minLegacyLength = 1 + SECURITY_CONSTANTS.SALT_LENGTH + SECURITY_CONSTANTS.IV_LENGTH + SECURITY_CONSTANTS.GCM_TAG_LENGTH;
 
     if (data.length < minLegacyLength) {
         throw new Error("Invalid encrypted data format.");
@@ -326,7 +334,7 @@ async function decryptAES(encrypted: string, password: string): Promise<string> 
         throw new Error("Unsupported encryption version.");
     }
 
-    if (!iterations || iterations < 1) {
+    if (!iterations || iterations > SECURITY_CONSTANTS.MAX_PBKDF2_ITERATIONS) {
         throw new Error("Invalid encryption parameters.");
     }
 
@@ -357,15 +365,15 @@ function scheduleAutoLock(channelId?: string) {
     clearAutoLockTimer();
 
     if (channelId) lastActivityChannelId = channelId;
-    if (!settings.store.enableEncryption || settings.store.autoLockTimeout <= 0) return;
+    if (!settings.store.enableEncryption || settings.store.autoLocked || settings.store.autoLockTimeout <= 0) return;
 
     autoLockTimer = setTimeout(() => {
-        settings.store.enableEncryption = false;
+        settings.store.autoLocked = true;
         logInfo("Encryption auto locked.");
 
         if (settings.store.notifyOnAutoLock && lastActivityChannelId) {
             sendBotMessage(lastActivityChannelId, {
-                content: "🔐 Encryption auto disabled after inactivity."
+                content: "🔐 Encryption is locked after inactivity. Unlock it with the chat bar button before sending."
             });
         }
     }, settings.store.autoLockTimeout * SECURITY_CONSTANTS.MILLISECONDS_PER_MINUTE);
@@ -406,7 +414,7 @@ const EncryptionDisabledIcon: IconComponent = ({ height = 20, width = 20, classN
 };
 
 const EncryptionToggleButton: ChatBarButtonFactory = ({ channel, type }) => {
-    const { enableEncryption } = settings.use();
+    const { enableEncryption, autoLocked } = settings.use(CHAT_BAR_SETTING_KEYS);
 
     const validChat = ["normal", "sidebar"].some(x => type.analyticsName === x);
 
@@ -414,9 +422,10 @@ const EncryptionToggleButton: ChatBarButtonFactory = ({ channel, type }) => {
 
     return (
         <ChatBarButton
-            tooltip={enableEncryption ? "Disable Encryption" : "Enable Encryption"}
+            tooltip={autoLocked ? "Unlock Encryption" : enableEncryption ? "Disable Encryption" : "Enable Encryption"}
             onClick={() => {
-                const newValue = !enableEncryption;
+                const newValue = autoLocked || !enableEncryption;
+                settings.store.autoLocked = false;
                 settings.store.enableEncryption = newValue;
                 scheduleAutoLock(channel.id);
 
@@ -435,12 +444,15 @@ const EncryptionToggleButton: ChatBarButtonFactory = ({ channel, type }) => {
     );
 };
 
+const SafeEncryptionToggleButton = ErrorBoundary.wrap(EncryptionToggleButton, { noop: true });
+
 const settings = definePluginSettings({
     encryptionPassword: {
         type: OptionType.STRING,
         description: "AES-256 encryption password shared with trusted users.",
         default: "",
         placeholder: "Enter strong shared password...",
+        componentProps: { type: "password" },
         onChange(newValue: string) {
             if (newValue) {
                 const errors = validatePassword(newValue);
@@ -453,7 +465,17 @@ const settings = definePluginSettings({
     enableEncryption: {
         type: OptionType.BOOLEAN,
         description: "Encrypt outgoing messages.",
-        default: false
+        default: false,
+        onChange() {
+            settings.store.autoLocked = false;
+            scheduleAutoLock();
+        }
+    },
+    autoLocked: {
+        type: OptionType.BOOLEAN,
+        description: "Pause outgoing messages after the inactivity timeout.",
+        default: false,
+        hidden: true
     },
     autoDecrypt: {
         type: OptionType.BOOLEAN,
@@ -531,7 +553,7 @@ const settings = definePluginSettings({
     },
     autoLockTimeout: {
         type: OptionType.SLIDER,
-        description: "Auto-disable encryption after minutes of inactivity. Use 0 to disable.",
+        description: "Lock outgoing messages after minutes of inactivity. Unlock with the chat bar button. Use 0 to disable.",
         markers: [0, 5, 15, 30, 60, 240],
         default: 30,
         stickToMarkers: true,
@@ -571,7 +593,7 @@ const settings = definePluginSettings({
     },
     notifyOnAutoLock: {
         type: OptionType.BOOLEAN,
-        description: "Show a Clyde message when auto lock disables encryption.",
+        description: "Show a Clyde message when outgoing messages are locked after inactivity.",
         default: true
     },
     enableLogging: {
@@ -587,9 +609,19 @@ export default definePlugin({
     tags: ["Privacy", "Chat"],
     authors: [EquicordDevs.irritably],
     settings,
+    settingsAboutComponent() {
+        return (
+            <Paragraph>
+                Securecord encrypts message text with AES-GCM and a shared password stored in your client settings.
+                Share that password through a trusted channel. Anyone who has it can read and create messages using it.
+                Uploads are blocked by default because they are not encrypted. Inactivity locks outgoing messages until
+                you unlock encryption; it does not erase the password or previously decrypted local messages.
+            </Paragraph>
+        );
+    },
     chatBarButton: {
         icon: EncryptionEnabledIcon,
-        render: EncryptionToggleButton
+        render: props => <SafeEncryptionToggleButton {...props} />
     },
 
     flux: {
@@ -639,67 +671,82 @@ export default definePlugin({
         },
     },
 
-    start() {
-        messageSendListener = async (channelId, message, options) => {
-            if (!settings.store.enableEncryption) return;
-            scheduleAutoLock(channelId);
+    async onBeforeMessageSend(channelId, message, options, props) {
+        if (!settings.store.enableEncryption) return;
+        scheduleAutoLock(channelId);
 
-            if (settings.store.blockUploadsWhileEncrypted && options.uploads?.length) {
-                sendBotMessage(channelId, {
-                    content: "❌ File uploads are not encrypted by Securecord and were blocked."
-                });
+        if (settings.store.blockUploadsWhileEncrypted && (props.hasAttachments || options.uploads?.length)) {
+            sendBotMessage(channelId, {
+                content: "❌ File uploads are not encrypted by Securecord and were blocked."
+            });
+            return { cancel: true };
+        }
+
+        return this.encryptMessage(channelId, message);
+    },
+
+    async onBeforeMessageEdit(channelId, messageId, message) {
+        const original = MessageStore.getMessage(channelId, messageId);
+        if (!settings.store.enableEncryption) {
+            if (original && isEncryptedMessage(original.content)) {
+                sendBotMessage(channelId, { content: "Enable encryption before editing an encrypted message." });
                 return { cancel: true };
             }
+            return;
+        }
+        scheduleAutoLock(channelId);
+        return this.encryptMessage(channelId, message);
+    },
 
-            if (!message.content || isEncryptedMessage(message.content)) return;
-            if (!settings.store.encryptEmptyMessages && !message.content.trim()) return;
+    async encryptMessage(channelId: string, message: MessageObject) {
+        if (settings.store.autoLocked) {
+            sendBotMessage(channelId, { content: "Encryption is locked. Unlock it with the chat bar button before sending." });
+            return { cancel: true };
+        }
+        if (!message.content || isEncryptedMessage(message.content)) return;
+        if (!settings.store.encryptEmptyMessages && !message.content.trim()) return;
 
-            const password = settings.store.encryptionPassword;
-            if (!password) {
-                if (settings.store.notifyOnEncryptionFailure) {
-                    sendBotMessage(channelId, {
-                        content: "❌ No encryption password set in plugin settings."
-                    });
-                }
-                return { cancel: settings.store.cancelOnEncryptionError };
+        const password = settings.store.encryptionPassword;
+        if (!password) {
+            if (settings.store.notifyOnEncryptionFailure) {
+                sendBotMessage(channelId, {
+                    content: "❌ No encryption password set in plugin settings."
+                });
+            }
+            return { cancel: settings.store.cancelOnEncryptionError };
+        }
+
+        try {
+            const encryptedMessage = await encryptAES(message.content, password);
+            message.content = `${SECURITY_CONSTANTS.ENCRYPTION_MARKER_START}${encryptedMessage}${SECURITY_CONSTANTS.ENCRYPTION_MARKER_END}`;
+
+            if (settings.store.notifyOnEncrypt) {
+                sendBotMessage(channelId, {
+                    content: "🔐 Message encrypted."
+                });
             }
 
-            try {
-                const encryptedMessage = await encryptAES(message.content, password);
-                message.content = `${SECURITY_CONSTANTS.ENCRYPTION_MARKER_START}${encryptedMessage}${SECURITY_CONSTANTS.ENCRYPTION_MARKER_END}`;
+            logInfo("Message encrypted.");
+        } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            logError("Message encryption error:", errorMessage);
 
-                if (settings.store.notifyOnEncrypt) {
-                    sendBotMessage(channelId, {
-                        content: "🔐 Message encrypted."
-                    });
-                }
-
-                logInfo("Message encrypted.");
-            } catch (error) {
-                const errorMessage = getErrorMessage(error);
-                logError("Message encryption error:", errorMessage);
-
-                if (settings.store.notifyOnEncryptionFailure) {
-                    sendBotMessage(channelId, {
-                        content: `❌ Message encryption failed. ${settings.store.cancelOnEncryptionError ? "The plaintext message was not sent." : "Check your password settings."}`
-                    });
-                }
-
-                return { cancel: settings.store.cancelOnEncryptionError };
+            if (settings.store.notifyOnEncryptionFailure) {
+                sendBotMessage(channelId, {
+                    content: `❌ Message encryption failed. ${settings.store.cancelOnEncryptionError ? "The plaintext message was not sent." : "Check your password settings."}`
+                });
             }
-        };
 
-        addMessagePreSendListener(messageSendListener);
+            return { cancel: settings.store.cancelOnEncryptionError };
+        }
+    },
+
+    start() {
         scheduleAutoLock();
         logInfo("Plugin loaded successfully.");
     },
 
     stop() {
-        if (messageSendListener) {
-            removeMessagePreSendListener(messageSendListener);
-            messageSendListener = null;
-        }
-
         clearAutoLockTimer();
         resetSecurityState();
         logInfo("Plugin stopped and security state reset.");

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import ErrorBoundary from "@components/ErrorBoundary";
+import { copyWithToast } from "@utils/discord";
 import type { RenderModalProps } from "@vencord/discord-types";
 import { Forms, Modal, openModal, TextArea } from "@webpack/common";
 
@@ -13,6 +15,7 @@ function DecryptModal(props: RenderModalProps & { message: string; verified: boo
             {...props}
             size="lg"
             title={<Forms.FormTitle tag="h4">Decrypted Message</Forms.FormTitle>}
+            actions={[{ text: "Copy message", variant: "primary", onClick: () => void copyWithToast(props.message) }]}
             subtitle={
                 <div style={{ color: props.verified ? "green" : "red", fontWeight: "bold", marginTop: "8px" }}>
                     {props.verified ? "Signature verified" : "Signature not verified"}
@@ -22,14 +25,16 @@ function DecryptModal(props: RenderModalProps & { message: string; verified: boo
             {/* Text area to mantain message formatting and \n */}
             <TextArea
                 value={props.message}
-                disabled={true}
-                rows={Math.max(5, props.message.split("\n").length + 1)}
+                readOnly={true}
+                rows={Math.min(15, Math.max(5, props.message.split("\n").length + 1))}
                 onChange={() => props.message}
             />
         </Modal>
     );
 }
 
+const SafeDecryptModal = ErrorBoundary.wrap(DecryptModal, { noop: true });
+
 export function buildDecryptModal(decryptedMessage: string, verified: boolean) {
-    openModal(props => <DecryptModal {...props} message={decryptedMessage} verified={verified} />);
+    openModal(props => <SafeDecryptModal {...props} message={decryptedMessage} verified={verified} />);
 }

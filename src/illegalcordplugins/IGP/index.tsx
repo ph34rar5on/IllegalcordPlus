@@ -5,9 +5,12 @@
  */
 
 import { ChatBarButton, ChatBarButtonFactory } from "@api/ChatButtons";
-import { ApplicationCommandInputType, ApplicationCommandOptionType, sendBotMessage } from "@api/Commands";
+import { ApplicationCommandInputType, ApplicationCommandOptionType, findOption, sendBotMessage } from "@api/Commands";
 import { DataStore } from "@api/index";
 import { definePluginSettings } from "@api/Settings";
+import ErrorBoundary from "@components/ErrorBoundary";
+import { Heading } from "@components/Heading";
+import { Paragraph } from "@components/Paragraph";
 import { EquicordDevs } from "@utils/constants";
 import { sendMessage } from "@utils/discord";
 import { Logger } from "@utils/Logger";
@@ -27,7 +30,7 @@ const ChatBarIcon: ChatBarButtonFactory = ({ isMainChat, channel }) => {
     return (
         <ChatBarButton
             tooltip="PGP/GPG Encrypt"
-            onClick={() => buildModal()}
+            onClick={() => buildModal(channel.id)}
 
             buttonProps={{
                 "aria-haspopup": "dialog",
@@ -51,6 +54,8 @@ const ChatBarIcon: ChatBarButtonFactory = ({ isMainChat, channel }) => {
         </ChatBarButton>
     );
 };
+
+const SafeChatBarIcon = ErrorBoundary.wrap(ChatBarIcon, { noop: true });
 
 function DecryptMessageIcon() {
     return (
@@ -280,21 +285,22 @@ export async function encrypt(message: string, public_key_recipient: string): Pr
     let private_key, public_key;
 
     try {
-        const privateKeyObj = await pgp.readPrivateKey({ armoredKey: formatKey(settings.store.pgpPrivateKey) });
-        // Decrypt private key if it requires a passphrase
-        if (!privateKeyObj.isDecrypted()) {
-            const { passphrase } = settings.store;
-            if (!passphrase) {
-                throw new Error("Passphrase required for private key but not provided");
+        if (settings.store.signMessages) {
+            const privateKeyObj = await pgp.readPrivateKey({ armoredKey: formatKey(settings.store.pgpPrivateKey) });
+            // Decrypt private key if it requires a passphrase
+            if (!privateKeyObj.isDecrypted()) {
+                const { passphrase } = settings.store;
+                if (!passphrase) {
+                    throw new Error("Passphrase required for private key but not provided");
+                }
+                private_key = await pgp.decryptKey({ privateKey: privateKeyObj, passphrase });
+            } else {
+                private_key = privateKeyObj;
             }
-            private_key = await pgp.decryptKey({ privateKey: privateKeyObj, passphrase });
-        } else {
-            private_key = privateKeyObj;
         }
         public_key = await pgp.readKey({ armoredKey: formatKey(settings.store.pgpPublicKey) });
-    } catch (e) {
-        showToast("Cannot read your private or public key, try setting them again in the plugin settings", Toasts.Type.FAILURE);
-        throw e;
+    } catch {
+        throw new Error("Cannot unlock your keys. Check your public key, private key, and passphrase in the plugin settings.");
     }
 
     // Preprocess the recipient's key to handle single-line format
@@ -302,22 +308,21 @@ export async function encrypt(message: string, public_key_recipient: string): Pr
     let pubKey_r;
     try {
         pubKey_r = await pgp.readKey({ armoredKey: processedKey });
-    } catch (e) {
-        showToast("The recipient's public key is not valid!", Toasts.Type.FAILURE);
-        throw e;
+    } catch {
+        throw new Error("The recipient's public key is not valid.");
     }
 
     try {
         const encrypted = await pgp.encrypt({
             message: await pgp.createMessage({ text: message }),
             encryptionKeys: [pubKey_r, public_key],
-            signingKeys: [private_key]
+            ...(private_key ? { signingKeys: [private_key] } : {})
         });
 
         return encrypted;
     } catch (e) {
         if (e instanceof Error) {
-            showToast("Error during encryption.\n" + (e as Error).message, Toasts.Type.FAILURE);
+            throw new Error("Encryption failed. " + e.message);
         }
         throw e;
     }
@@ -457,8 +462,7 @@ async function decryptMessage(message: string, authorId: string): Promise<{ data
             const verificationResult = await verifyMessage(armoredMessage);
             return { data: verificationResult.text, verified: verificationResult.valid };
         } catch (e) {
-            showToast("Cannot process signed message: " + formatError(e), Toasts.Type.FAILURE);
-            throw e;
+            throw new Error("Cannot process the signed message. " + formatError(e));
         }
     }
 
@@ -475,9 +479,8 @@ async function decryptMessage(message: string, authorId: string): Promise<{ data
         } else {
             private_key = privateKeyObj;
         }
-    } catch (e) {
-        showToast("Cannot read personal private key", Toasts.Type.FAILURE);
-        throw e;
+    } catch {
+        throw new Error("Cannot unlock your private key. Check the key and passphrase in the plugin settings.");
     }
 
     let verificationKeyArmored: string = "";
@@ -500,9 +503,8 @@ async function decryptMessage(message: string, authorId: string): Promise<{ data
                         verificationKeyArmored = publicKeys[authorId];
                     }
                 }
-            } catch (e) {
-                showToast("Cannot find the senders signature", Toasts.Type.FAILURE);
-                throw e;
+            } catch {
+                throw new Error("Cannot load the sender's saved public key.");
             }
         }
     }
@@ -518,9 +520,8 @@ async function decryptMessage(message: string, authorId: string): Promise<{ data
             expectSigned: false,
             ...(verificationKeys ? { verificationKeys } : {})
         });
-    } catch (e) {
-        showToast("Cannot decrypt message: check your private key", Toasts.Type.FAILURE);
-        throw e;
+    } catch {
+        throw new Error("Cannot decrypt this message. Check that you have the recipient's private key and the full message.");
     }
 
     // Verify signature
@@ -666,6 +667,7 @@ const settings = definePluginSettings({
     pgpPrivateKey: {
         type: OptionType.STRING,
         description: "Your PGP private key (armored format).",
+        multiline: true,
         tags: ["Privacy", "Utility"],
         default: "",
         hidden: false,
@@ -673,18 +675,22 @@ const settings = definePluginSettings({
     pgpPublicKey: {
         type: OptionType.STRING,
         description: "Your PGP public key (armored format).",
+        multiline: true,
         default: "",
         hidden: false,
     },
     passphrase: {
         type: OptionType.STRING,
         description: "Passphrase for your private key.",
+        componentProps: { type: "password" },
         default: "",
         hidden: false,
     },
     knownPublicKeys: {
         type: OptionType.STRING,
         description: "JSON map of user IDs to their public keys.",
+        multiline: true,
+        onChange: () => keyManager.loadKeys(),
         default: "{}",
         hidden: false,
     },
@@ -700,7 +706,7 @@ const settings = definePluginSettings({
     },
 });
 
-const keyManager = new KeyManager();
+export const keyManager = new KeyManager();
 
 export default definePlugin({
     name: "IGP",
@@ -712,23 +718,53 @@ export default definePlugin({
         keyManager.loadKeys();
     },
 
-    renderChatBarButton: ChatBarIcon,
-    decryptMessageIcon: () => <DecryptMessageIcon />,
+    settingsAboutComponent() {
+        return (
+            <>
+                <Heading tag="h3">Getting started with IGP</Heading>
+                <Paragraph>
+                    Create your keys with <code>/pgp generate</code>, or paste an existing key pair below.
+                    Keep a backup of your private key before generating a replacement so you can still read older messages.
+                    Your private key and passphrase are stored in the client settings.
+                </Paragraph>
+                <Paragraph>
+                    Share only your public key with <code>/pgp sharekey</code> and import a contact's key with
+                    {" "}<code>/pgp import</code>. Compare fingerprints through a trusted channel before using a key.
+                </Paragraph>
+                <Paragraph>
+                    Use the lock button in a direct message to encrypt a draft. In group messages, choose one recipient;
+                    the other group members cannot decrypt it. Review the encrypted draft before sending it.
+                    The <code>/pgp encrypt</code> command sends the encrypted message directly.
+                </Paragraph>
+                <Paragraph>
+                    Hover over a PGP message and choose Decrypt Message to read it locally.
+                    A verified signature confirms a match with the saved public key, not the real identity of its owner.
+                    Encryption protects the message content, while Discord can still see participants and message timing.
+                </Paragraph>
+            </>
+        );
+    },
 
-    GPG_REGEX: PGP_MESSAGE_REGEX,
-    renderMessagePopoverButton(message) {
-        return this.GPG_REGEX.test(message?.content) ?
-            {
+    chatBarButton: { icon: DecryptMessageIcon, render: props => <SafeChatBarIcon {...props} /> },
+    messagePopoverButton: {
+        icon: DecryptMessageIcon,
+        render(message) {
+            if (!PGP_MESSAGE_REGEX.test(message.content)) return null;
+            return {
                 label: "Decrypt Message",
-                icon: this.decryptMessageIcon,
+                icon: DecryptMessageIcon,
                 message: message,
                 channel: ChannelStore.getChannel(message.channel_id),
                 onClick: async () => {
-                    const decrypted = await decryptMessage(message.content, message.author.id);
-                    buildDecryptModal(decrypted.data, decrypted.verified);
+                    try {
+                        const decrypted = await decryptMessage(message.content, message.author.id);
+                        buildDecryptModal(decrypted.data, decrypted.verified);
+                    } catch (error) {
+                        showToast(formatError(error), Toasts.Type.FAILURE);
+                    }
                 }
-            }
-            : null;
+            };
+        }
     },
 
     commands: [
@@ -774,13 +810,13 @@ export default definePlugin({
                 const reply = (content: string) => {
                     sendBotMessage(ctx.channel.id, { content });
                 };
-                const sub = args[0];
+                const sub = args.find(arg => arg.type === ApplicationCommandOptionType.SUB_COMMAND);
                 if (!sub) {
                     reply("Choose a PGP command.");
                     return;
                 }
 
-                const getOpt = (n: string) => sub.options?.find(o => o.name === n)?.value;
+                const getOpt = (name: string) => findOption<string>(sub.options ?? [], name);
 
                 try {
                     await ensureOpenPGP();

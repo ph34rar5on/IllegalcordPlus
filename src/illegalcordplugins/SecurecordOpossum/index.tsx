@@ -5,13 +5,16 @@
  */
 
 import { ChatBarButton, ChatBarButtonFactory } from "@api/ChatButtons";
-import { ApplicationCommandInputType, ApplicationCommandOptionType, sendBotMessage } from "@api/Commands";
-import { addMessagePreSendListener, MessageSendListener, removeMessagePreSendListener } from "@api/MessageEvents";
+import { ApplicationCommandInputType, ApplicationCommandOptionType, findOption, sendBotMessage } from "@api/Commands";
+import type { MessageObject } from "@api/MessageEvents";
 import { definePluginSettings } from "@api/Settings";
+import ErrorBoundary from "@components/ErrorBoundary";
+import { Paragraph } from "@components/Paragraph";
 import { EquicordDevs } from "@utils/constants";
 import { Logger } from "@utils/Logger";
 import definePlugin, { IconComponent, OptionType } from "@utils/types";
 import { CommandContext, Message } from "@vencord/discord-types";
+import { MessageStore } from "@webpack/common";
 
 interface IMessageCreate {
     type: "MESSAGE_CREATE";
@@ -33,7 +36,7 @@ const ENCRYPTED_SUFFIX = ":ENDLOCK";
 const ENCRYPTED_PREFIX_FIRST_CODE = ENCRYPTED_PREFIX.charCodeAt(0);
 const ENCRYPTED_SUFFIX_LAST_CODE = ENCRYPTED_SUFFIX.charCodeAt(ENCRYPTED_SUFFIX.length - 1);
 const MIN_ENCRYPTED_MESSAGE_LENGTH = ENCRYPTED_PREFIX.length + ENCRYPTED_SUFFIX.length + 1;
-const CHAT_BAR_SETTING_KEYS = ["pluginActivated", "encryptionEnabled"] satisfies Array<"pluginActivated" | "encryptionEnabled">;
+const CHAT_BAR_SETTING_KEYS = ["pluginActivated", "encryptionEnabled", "autoLocked"] satisfies Array<"pluginActivated" | "encryptionEnabled" | "autoLocked">;
 const SECURITY_CONSTANTS = {
     DEFAULT_MIN_PASSWORD_LENGTH: 12,
     MAX_PASSWORD_LENGTH: 128,
@@ -292,7 +295,6 @@ let cipherPassword = "";
 let failedAttempts = 0;
 let lockoutEndTime = 0;
 let lastDecryptionAttempt = 0;
-let messageSendListener: MessageSendListener | null = null;
 let autoLockTimer: ReturnType<typeof setTimeout> | null = null;
 let lastActivityChannelId: string | null = null;
 
@@ -460,6 +462,9 @@ function encryptOpossum(text: string, password: string): string {
 }
 
 function decryptOpossum(encrypted: string, password: string): string {
+    if (encrypted.length > SECURITY_CONSTANTS.MAX_DISCORD_MESSAGE_LENGTH) {
+        throw new Error("Encrypted message is too large.");
+    }
     const decryptedMessage = getCipher(password).decrypt(encrypted);
     resetSecurityState();
     return decryptedMessage;
@@ -476,15 +481,15 @@ function scheduleAutoLock(channelId?: string) {
     clearAutoLockTimer();
 
     if (channelId) lastActivityChannelId = channelId;
-    if (!settings.store.pluginActivated || !settings.store.encryptionEnabled || settings.store.autoLockTimeout <= 0) return;
+    if (!settings.store.pluginActivated || !settings.store.encryptionEnabled || settings.store.autoLocked || settings.store.autoLockTimeout <= 0) return;
 
     autoLockTimer = setTimeout(() => {
-        settings.store.encryptionEnabled = false;
+        settings.store.autoLocked = true;
         logInfo("Encryption auto locked.");
 
         if (settings.store.notifyOnAutoLock && lastActivityChannelId) {
             sendBotMessage(lastActivityChannelId, {
-                content: "🔐 Encryption auto disabled after inactivity."
+                content: "🔐 Encryption is locked after inactivity. Unlock it with the chat bar button before sending."
             });
         }
     }, settings.store.autoLockTimeout * SECURITY_CONSTANTS.MILLISECONDS_PER_MINUTE);
@@ -527,7 +532,7 @@ const EncryptionDisabledIcon: IconComponent = ({ height = 20, width = 20, classN
 
 // Chatbar button
 const EncryptionToggleButton: ChatBarButtonFactory = ({ channel, type }) => {
-    const { pluginActivated, encryptionEnabled } = settings.use(CHAT_BAR_SETTING_KEYS);
+    const { pluginActivated, encryptionEnabled, autoLocked } = settings.use(CHAT_BAR_SETTING_KEYS);
 
     const validChat = type.analyticsName === "normal" || type.analyticsName === "sidebar";
 
@@ -558,9 +563,10 @@ const EncryptionToggleButton: ChatBarButtonFactory = ({ channel, type }) => {
 
     return (
         <ChatBarButton
-            tooltip={encryptionEnabled ? "Disable Encryption" : "Enable Encryption"}
+            tooltip={autoLocked ? "Unlock Encryption" : encryptionEnabled ? "Disable Encryption" : "Enable Encryption"}
             onClick={() => {
-                const newValue = !encryptionEnabled;
+                const newValue = autoLocked || !encryptionEnabled;
+                settings.store.autoLocked = false;
                 settings.store.encryptionEnabled = newValue;
                 scheduleAutoLock(channel.id);
 
@@ -580,7 +586,8 @@ const EncryptionToggleButton: ChatBarButtonFactory = ({ channel, type }) => {
     );
 };
 
-// Plugin settings definition
+const SafeEncryptionToggleButton = ErrorBoundary.wrap(EncryptionToggleButton, { noop: true });
+
 const settings = definePluginSettings({
     pluginActivated: {
         type: OptionType.BOOLEAN,
@@ -596,6 +603,7 @@ const settings = definePluginSettings({
         description: "BlazingOpossum encryption password shared with trusted users.",
         default: "",
         placeholder: "Enter strong shared password...",
+        componentProps: { type: "password" },
         onChange(newValue: string) {
             if (newValue) {
                 const errors = validatePassword(newValue);
@@ -611,8 +619,15 @@ const settings = definePluginSettings({
         description: "Encrypt outgoing messages.",
         default: false,
         onChange() {
+            settings.store.autoLocked = false;
             scheduleAutoLock();
         }
+    },
+    autoLocked: {
+        type: OptionType.BOOLEAN,
+        description: "Pause outgoing messages after the inactivity timeout.",
+        default: false,
+        hidden: true
     },
     autoDecrypt: {
         type: OptionType.BOOLEAN,
@@ -670,7 +685,7 @@ const settings = definePluginSettings({
     },
     autoLockTimeout: {
         type: OptionType.SLIDER,
-        description: "Auto-disable encryption after minutes of inactivity. Use 0 to disable.",
+        description: "Lock outgoing messages after minutes of inactivity. Unlock with the chat bar button. Use 0 to disable.",
         markers: [0, 5, 15, 30, 60, 240],
         default: 30,
         stickToMarkers: true,
@@ -710,7 +725,7 @@ const settings = definePluginSettings({
     },
     notifyOnAutoLock: {
         type: OptionType.BOOLEAN,
-        description: "Show a Clyde message when auto lock disables encryption.",
+        description: "Show a Clyde message when outgoing messages are locked after inactivity.",
         default: true
     },
     enableLogging: {
@@ -726,74 +741,104 @@ export default definePlugin({
     tags: ["Privacy", "Chat"],
     authors: [EquicordDevs.irritably],
     settings,
+    settingsAboutComponent() {
+        return (
+            <>
+                <Paragraph>
+                    Opossum uses a custom legacy cipher. Its password derivation only uses the first 32 UTF-8 bytes,
+                    so passwords that differ only after those bytes produce the same key. This implementation provides
+                    no basis for a claim of post-quantum security. Prefer Securecord for new encrypted conversations.
+                    Existing Opossum messages remain compatible with this version.
+                </Paragraph>
+                <Paragraph>
+                    Passwords are stored in your client settings. Uploads are blocked by default because they are not encrypted.
+                    Inactivity locks outgoing messages until you unlock encryption with the chat bar button.
+                    Locking does not erase the password or previously decrypted local messages.
+                </Paragraph>
+            </>
+        );
+    },
     chatBarButton: {
         icon: EncryptionEnabledIcon,
-        render: EncryptionToggleButton
+        render: props => <SafeEncryptionToggleButton {...props} />
+    },
+
+    async onBeforeMessageSend(channelId, message, options, props) {
+        if (!settings.store.pluginActivated || !settings.store.encryptionEnabled) return;
+        scheduleAutoLock(channelId);
+
+        if (settings.store.blockUploadsWhileEncrypted && (props.hasAttachments || options.uploads?.length)) {
+            sendBotMessage(channelId, {
+                content: "❌ File uploads are not encrypted by Securecord Opossum and were blocked."
+            });
+            return { cancel: true };
+        }
+
+        return this.encryptMessage(channelId, message);
+    },
+
+    async onBeforeMessageEdit(channelId, messageId, message) {
+        const original = MessageStore.getMessage(channelId, messageId);
+        if (!(settings.store.pluginActivated && settings.store.encryptionEnabled)) {
+            if (original && isEncryptedMessage(original.content)) {
+                sendBotMessage(channelId, { content: "Enable encryption before editing an encrypted message." });
+                return { cancel: true };
+            }
+            return;
+        }
+        scheduleAutoLock(channelId);
+        return this.encryptMessage(channelId, message);
+    },
+
+    async encryptMessage(channelId: string, message: MessageObject) {
+        if (settings.store.autoLocked) {
+            sendBotMessage(channelId, { content: "Encryption is locked. Unlock it with the chat bar button before sending." });
+            return { cancel: true };
+        }
+        if (!message.content || isEncryptedMessage(message.content)) return;
+        if (!settings.store.encryptEmptyMessages && !message.content.trim()) return;
+
+        const password = settings.store.encryptionPassword;
+        if (!password) {
+            if (settings.store.notifyOnEncryptionFailure) {
+                sendBotMessage(channelId, {
+                    content: "❌ No encryption password set in plugin settings."
+                });
+            }
+            return { cancel: settings.store.cancelOnEncryptionError };
+        }
+
+        try {
+            const encryptedMessage = encryptOpossum(message.content, password);
+            message.content = `${ENCRYPTED_PREFIX}${encryptedMessage}${ENCRYPTED_SUFFIX}`;
+
+            if (settings.store.notifyOnEncrypt) {
+                sendBotMessage(channelId, {
+                    content: "🔐 Message encrypted."
+                });
+            }
+
+            logInfo("Message encrypted.");
+        } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            logError("Message encryption error:", errorMessage);
+
+            if (settings.store.notifyOnEncryptionFailure) {
+                sendBotMessage(channelId, {
+                    content: `❌ Message encryption failed. ${settings.store.cancelOnEncryptionError ? "The plaintext message was not sent." : "Check your password settings."}`
+                });
+            }
+
+            return { cancel: settings.store.cancelOnEncryptionError };
+        }
     },
 
     start() {
-        // Add listener to encrypt messages before sending
-        messageSendListener = async (channelId, message, options) => {
-            if (!settings.store.pluginActivated || !settings.store.encryptionEnabled) return;
-            scheduleAutoLock(channelId);
-
-            if (settings.store.blockUploadsWhileEncrypted && options.uploads?.length) {
-                sendBotMessage(channelId, {
-                    content: "❌ File uploads are not encrypted by Securecord Opossum and were blocked."
-                });
-                return { cancel: true };
-            }
-
-            if (!message.content || isEncryptedMessage(message.content)) return;
-            if (!settings.store.encryptEmptyMessages && !message.content.trim()) return;
-
-            const password = settings.store.encryptionPassword;
-            if (!password) {
-                if (settings.store.notifyOnEncryptionFailure) {
-                    sendBotMessage(channelId, {
-                        content: "❌ No encryption password set in plugin settings."
-                    });
-                }
-                return { cancel: settings.store.cancelOnEncryptionError };
-            }
-
-            try {
-                const encryptedMessage = encryptOpossum(message.content, password);
-                message.content = `${ENCRYPTED_PREFIX}${encryptedMessage}${ENCRYPTED_SUFFIX}`;
-
-                if (settings.store.notifyOnEncrypt) {
-                    sendBotMessage(channelId, {
-                        content: "🔐 Message encrypted."
-                    });
-                }
-
-                logInfo("Message encrypted.");
-            } catch (error) {
-                const errorMessage = getErrorMessage(error);
-                logError("Message encryption error:", errorMessage);
-
-                if (settings.store.notifyOnEncryptionFailure) {
-                    sendBotMessage(channelId, {
-                        content: `❌ Message encryption failed. ${settings.store.cancelOnEncryptionError ? "The plaintext message was not sent." : "Check your password settings."}`
-                    });
-                }
-
-                return { cancel: settings.store.cancelOnEncryptionError };
-            }
-        };
-
-        addMessagePreSendListener(messageSendListener);
         scheduleAutoLock();
         logInfo("Plugin loaded successfully.");
     },
 
     stop() {
-        // Remove listener when plugin is stopped
-        if (messageSendListener) {
-            removeMessagePreSendListener(messageSendListener);
-            messageSendListener = null;
-        }
-
         // Clean up cipher
         clearAutoLockTimer();
         resetCipher();
@@ -879,7 +924,7 @@ export default definePlugin({
             execute: async (args, ctx) => {
                 const commandContext = ctx as DecryptCommandContext;
                 const replyMessage = commandContext.message?.referencedMessage;
-                const encryptedTextArg = args[0]?.value;
+                const encryptedTextArg = findOption<string>(args, "encrypted-text");
 
                 let messageContent: string | undefined;
 

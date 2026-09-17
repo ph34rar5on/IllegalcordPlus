@@ -20,7 +20,7 @@ import "./styles.css";
 
 import * as DataStore from "@api/DataStore";
 import { showNotification } from "@api/Notifications";
-import { plugins as Plugins, stopPlugin } from "@api/PluginManager";
+import { isPluginEnabled, pluginRequiresRestart, plugins as Plugins, stopPlugin } from "@api/PluginManager";
 import { definePluginSettings, Settings } from "@api/Settings";
 import { BaseText } from "@components/BaseText";
 import { Button } from "@components/Button";
@@ -33,11 +33,15 @@ import { copyWithToast } from "@utils/discord";
 import { SYM_LAZY_GET } from "@utils/lazy";
 import { Logger } from "@utils/Logger";
 import { relaunch } from "@utils/native";
+import { escapeRegExp } from "@utils/text";
 import definePlugin, { OptionType, type Plugin, type PluginNative } from "@utils/types";
 import { checkForUpdates, isNewer, maybePromptToUpdate, update as updateIllegalcord } from "@utils/updater";
 import type { RenderModalProps } from "@vencord/discord-types";
 import { filters, findBulk, proxyLazyWebpack } from "@webpack";
 import { Alerts, closeAllModals, closeModal, DraftType, ExpressionPickerStore, FluxDispatcher, Modal, NavigationRouter, openModal, React, SelectedChannelStore } from "@webpack/common";
+import type { ReactNode } from "react";
+
+import { PluginMeta } from "~plugins";
 
 import type * as NativeModule from "./native";
 
@@ -47,11 +51,11 @@ const REINSTALL_URL = "https://github.com/ImHisako/Illegalcord";
 const cl = classNameFactory("vc-crash-handler-enhanced-");
 const logger = new Logger("CrashHandlerEnhanced");
 const SETTINGS_KEYS: Array<"lastCrashAt" | "crashCount"> = ["lastCrashAt", "crashCount"];
+const SCREEN_SETTINGS_KEYS: Array<"lastCrashReport" | "showSupportPopup" | "detectBlankScreen"> = ["lastCrashReport", "showSupportPopup", "detectBlankScreen"];
 const PROTECTED_PLUGIN_NAMES = new Set([PLUGIN_NAME, "CrashHandler"]);
 const BREADCRUMB_LIMIT = 40;
 const BREADCRUMB_MAX_AGE = 15000;
 const BREADCRUMB_DETECTION_AGE = 5000;
-const REPEATED_PLUGIN_CRASH_AGE = 20000;
 const NO_PLUGIN_DETECTED = "No plugin detected";
 const NO_PLUGIN_DETECTION_REASON = "The crash stack did not match any enabled plugin.";
 const NO_PLUGIN_DISABLED = "None";
@@ -63,7 +67,7 @@ const SOCKET_ALIVE_TIMEOUT_RE = /^(?:Max tries exceeded, last error: Error: )?so
 const Native = VencordNative.pluginHelpers.CrashHandlerEnhanced as PluginNative<typeof NativeModule> | undefined;
 
 type DetectionConfidence = "none" | "low" | "medium" | "high";
-type DetectionSource = "none" | "stack-path" | "stack-name" | "breadcrumb" | "repeated-crash";
+type DetectionSource = "none" | "callback-error" | "stack-path" | "stack-name" | "breadcrumb";
 
 interface CrashBoundary {
     setState(state: CrashErrorState | RecoveredCrashState): void;
@@ -90,6 +94,7 @@ interface CrashReport {
     recentCrashCount: number;
     recovered: boolean;
     suspectedPlugin: string;
+    suspectedPluginCategory: "Equicord" | "Illegalcord" | "Vencord" | "User plugin" | "Unknown";
     suspectedPluginReason: string;
     suspectedPluginConfidence: DetectionConfidence;
     suspectedPluginSource: DetectionSource;
@@ -142,11 +147,6 @@ interface PluginBreadcrumb {
     detail?: string;
 }
 
-interface PluginCrashAttribution {
-    timestamp: number;
-    pluginName: string;
-}
-
 type PluginCallback = (this: unknown, ...args: unknown[]) => unknown;
 
 interface InstrumentedMethod {
@@ -182,6 +182,11 @@ const settings = definePluginSettings({
     showSupportPopup: {
         type: OptionType.BOOLEAN,
         description: "Show the Illegalcord support popup after a crash.",
+        default: true
+    },
+    detectBlankScreen: {
+        type: OptionType.BOOLEAN,
+        description: "Show the support popup when Discord renders an empty root or encounters an uncaught JavaScript error.",
         default: true
     },
     promptForUpdates: {
@@ -240,11 +245,13 @@ let crashModalOpen = false;
 let latestReport: CrashReport | null = null;
 let queuedCrash: PendingCrash | null = null;
 let recentCrashTimes: number[] = [];
-let recentPluginCrashes: PluginCrashAttribution[] = [];
+let pluginErrorOrigins = new WeakMap<object, PluginDetection>();
 let pluginBreadcrumbs: PluginBreadcrumb[] = [];
 const notifiedPluginNames = new Set<string>();
 let crashLogWriteQueue: Promise<void> = Promise.resolve();
 let globalListenersInstalled = false;
+let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+let supportScreenMounted = false;
 const breadcrumbWrappedFunctions = new WeakSet<object>();
 const instrumentedMethods: InstrumentedMethod[] = [];
 
@@ -341,14 +348,9 @@ function getChannelId() {
     }
 }
 
-function isPluginRuntimeEnabled(pluginName: string, plugin: Plugin) {
-    return Boolean(plugin.required || plugin.isDependency || Settings.plugins[pluginName]?.enabled);
-}
-
 function getEnabledPluginSnapshot() {
-    return Object.entries(Plugins)
-        .filter(([pluginName, plugin]) => isPluginRuntimeEnabled(pluginName, plugin))
-        .map(([pluginName]) => pluginName)
+    return Object.keys(Plugins)
+        .filter(isPluginEnabled)
         .sort((a, b) => a.localeCompare(b));
 }
 
@@ -399,18 +401,35 @@ function wrapPluginCallback<T extends PluginCallback>(pluginName: string, surfac
             const result = Reflect.apply(original, this, args) as unknown;
 
             if (isPromiseLike(result)) {
-                void Promise.resolve(result).catch(error => addPluginBreadcrumb(pluginName, `${surface} rejected`, getErrorMessage(error)));
+                return Promise.resolve(result).catch((error: unknown) => {
+                    rememberPluginError(pluginName, surface, error);
+                    throw error;
+                });
             }
 
             return result;
         } catch (error) {
-            addPluginBreadcrumb(pluginName, `${surface} threw`, getErrorMessage(error));
+            rememberPluginError(pluginName, surface, error);
             throw error;
         }
     } as T;
 
     breadcrumbWrappedFunctions.add(wrapped);
     return wrapped;
+}
+
+function rememberPluginError(pluginName: string, surface: string, error: unknown) {
+    if (!globalListenersInstalled) return;
+    addPluginBreadcrumb(pluginName, `${surface} failed`);
+    const record = asRecord(error);
+    if (!record || pluginErrorOrigins.has(record)) return;
+
+    pluginErrorOrigins.set(record, {
+        name: pluginName,
+        confidence: "high",
+        source: "callback-error",
+        reason: `This exact error escaped the plugin callback: ${surface}.`
+    });
 }
 
 function wrapObjectMethod(owner: Record<PropertyKey, unknown>, key: string, pluginName: string, surface: string) {
@@ -434,6 +453,17 @@ function instrumentPlugin(plugin: Plugin) {
     wrapObjectMethod(pluginRecord, "onBeforeMessageSend", plugin.name, "message send");
     wrapObjectMethod(pluginRecord, "onBeforeMessageEdit", plugin.name, "message edit");
     wrapObjectMethod(pluginRecord, "onMessageClick", plugin.name, "message click");
+
+    const selfReference = escapeRegExp(`Vencord.Plugins.plugins[${JSON.stringify(plugin.name)}]`);
+    const methodPattern = new RegExp(`(?:\\$self|${selfReference})\\.(\\w+)\\(`, "g");
+    for (const patch of plugin.patches ?? []) {
+        for (const replacement of [patch.replacement].flat()) {
+            if (typeof replacement.replace !== "string") continue;
+            for (const match of replacement.replace.matchAll(methodPattern)) {
+                wrapObjectMethod(pluginRecord, match[1], plugin.name, `patch callback ${match[1]}`);
+            }
+        }
+    }
 
     for (const command of plugin.commands ?? []) {
         const commandRecord = asRecord(command);
@@ -480,6 +510,8 @@ function createReport(errorState: CrashErrorState): CrashReport {
     recentCrashTimes.push(now);
 
     const totalCrashes = Number(settings.store.crashCount || "0") + 1;
+    const detection = detectSuspectedPlugin(errorState);
+    const folder = detection ? PluginMeta[detection.name].folderName : "";
 
     return {
         id: `${now}-${totalCrashes}`,
@@ -491,10 +523,14 @@ function createReport(errorState: CrashErrorState): CrashReport {
         crashCount: totalCrashes,
         recentCrashCount: recentCrashTimes.length,
         recovered: false,
-        suspectedPlugin: NO_PLUGIN_DETECTED,
-        suspectedPluginReason: NO_PLUGIN_DETECTION_REASON,
-        suspectedPluginConfidence: "none",
-        suspectedPluginSource: "none",
+        suspectedPlugin: detection?.name ?? NO_PLUGIN_DETECTED,
+        suspectedPluginCategory: folder.startsWith("src/equicordplugins/") ? "Equicord"
+            : folder.startsWith("src/illegalcordplugins/") ? "Illegalcord"
+                : folder.startsWith("src/plugins/") ? "Vencord"
+                    : folder.startsWith("src/userplugins/") ? "User plugin" : "Unknown",
+        suspectedPluginReason: detection?.reason ?? NO_PLUGIN_DETECTION_REASON,
+        suspectedPluginConfidence: detection?.confidence ?? "none",
+        suspectedPluginSource: detection?.source ?? "none",
         disabledPlugin: NO_PLUGIN_DISABLED,
         disableReason: NO_PLUGIN_DISABLE_REASON,
         breadcrumbs: getRecentBreadcrumbs(),
@@ -511,6 +547,7 @@ function createPlaceholderReport(): CrashReport {
         recentCrashCount: 0,
         recovered: false,
         suspectedPlugin: NO_PLUGIN_DETECTED,
+        suspectedPluginCategory: "Unknown",
         suspectedPluginReason: NO_PLUGIN_DETECTION_REASON,
         suspectedPluginConfidence: "none",
         suspectedPluginSource: "none",
@@ -531,6 +568,7 @@ function formatReport(report: CrashReport) {
         `Channel: ${report.channelId ?? "Unknown"}`,
         `Error: ${report.message}`,
         `Suspected plugin: ${report.suspectedPlugin}`,
+        `Plugin category: ${report.suspectedPluginCategory}`,
         `Detection confidence: ${report.suspectedPluginConfidence}`,
         `Detection source: ${report.suspectedPluginSource}`,
         `Suspected plugin reason: ${report.suspectedPluginReason}`,
@@ -623,111 +661,67 @@ async function checkAndUpdateIllegalcord() {
     }
 }
 
-function normalizeSearchText(value: string) {
-    return value.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
+function detectSuspectedPlugin(errorState: CrashErrorState): PluginDetection | undefined {
+    const errors: unknown[] = [];
+    let { error } = errorState;
+    while (error != null && errors.length < 8 && !errors.includes(error)) {
+        errors.push(error);
+        error = asRecord(error)?.cause;
+    }
+    errors.reverse();
 
-function getCrashSearchText(errorState: CrashErrorState) {
-    return [
-        getErrorMessage(errorState.error),
-        getErrorStack(errorState.error),
-        getComponentStack(errorState.info)
-    ].filter(Boolean).join("\n").toLowerCase();
-}
+    for (const error of errors) {
+        const record = asRecord(error);
+        const origin = record && pluginErrorOrigins.get(record);
+        if (origin) return origin;
+    }
 
-function getLatestBreadcrumbDetection(): PluginDetection | undefined {
+    const frames = [...errors.map(getErrorStack), getComponentStack(errorState.info)]
+        .flatMap(stack => stack?.split("\n") ?? [])
+        .filter(line => /^\s*at\s|^[^\s@]+@/.test(line))
+        .map(line => line.replaceAll("\\", "/").toLowerCase());
+    const enabledPlugins = Object.keys(Plugins)
+        .filter(name => !PROTECTED_PLUGIN_NAMES.has(name) && isPluginEnabled(name));
+
+    for (const frame of frames) {
+        for (const name of enabledPlugins) {
+            const folder = PluginMeta[name].folderName.replace(/^src\//, "").toLowerCase();
+            const path = new RegExp(`(?:^|/)${escapeRegExp(folder)}/`);
+            const encodedPath = new RegExp(`(?:^|/)${escapeRegExp(encodeURI(folder).toLowerCase())}/`);
+            if (!path.test(frame) && !encodedPath.test(frame)) continue;
+
+            return {
+                name,
+                confidence: "high",
+                source: "stack-path",
+                reason: "The nearest plugin frame in the error stack matches this plugin's source folder."
+            };
+        }
+    }
+
+    for (const frame of frames) {
+        const functionName = frame.split(/\(|@/)[0];
+        const matches = enabledPlugins.filter(name => new RegExp(`(?:^|[^\\w$])${escapeRegExp(name)}(?=[.\\s]|$)`, "i").test(functionName));
+        if (matches.length !== 1) continue;
+        return {
+            name: matches[0],
+            confidence: "medium",
+            source: "stack-name",
+            reason: "A stack frame names this plugin, but its source folder could not be verified."
+        };
+    }
+
     const now = Date.now();
-    const breadcrumb = [...pluginBreadcrumbs]
-        .reverse()
-        .find(entry => {
-            if (now - entry.timestamp > BREADCRUMB_DETECTION_AGE) return false;
-
-            const plugin = Plugins[entry.pluginName];
-            return Boolean(plugin && isPluginRuntimeEnabled(entry.pluginName, plugin));
-        });
-
-    if (!breadcrumb) return undefined;
-
+    const recent = pluginBreadcrumbs.filter(entry => now - entry.timestamp <= BREADCRUMB_DETECTION_AGE && isPluginEnabled(entry.pluginName));
+    const names = new Set(recent.map(entry => entry.pluginName));
+    if (names.size !== 1) return undefined;
+    const breadcrumb = recent[recent.length - 1];
     return {
         name: breadcrumb.pluginName,
         confidence: "low",
         source: "breadcrumb",
-        reason: `The plugin ran recently: ${breadcrumb.surface}.`
+        reason: `Only this plugin was observed recently: ${breadcrumb.surface}. Recent activity alone does not establish the cause.`
     };
-}
-
-function applyRepeatedCrashBoost(detection: PluginDetection) {
-    const now = Date.now();
-    recentPluginCrashes = recentPluginCrashes.filter(entry => now - entry.timestamp <= REPEATED_PLUGIN_CRASH_AGE);
-
-    const recentSamePluginCrashes = recentPluginCrashes.filter(entry => entry.pluginName === detection.name).length;
-    if (recentSamePluginCrashes >= 2 && detection.confidence !== "high") {
-        return {
-            ...detection,
-            confidence: "high" as const,
-            source: "repeated-crash" as const,
-            reason: `${detection.reason} The same plugin was suspected repeatedly.`
-        };
-    }
-
-    if (recentSamePluginCrashes >= 1 && detection.confidence === "low") {
-        return {
-            ...detection,
-            confidence: "medium" as const,
-            source: "repeated-crash" as const,
-            reason: `${detection.reason} The same plugin was suspected in a recent crash.`
-        };
-    }
-
-    return detection;
-}
-
-function rememberPluginCrash(pluginName: string) {
-    recentPluginCrashes.push({ pluginName, timestamp: Date.now() });
-}
-
-function detectSuspectedPlugin(errorState: CrashErrorState): PluginDetection | undefined {
-    const searchText = getCrashSearchText(errorState);
-    const compactSearchText = normalizeSearchText(searchText);
-
-    for (const [pluginName, plugin] of Object.entries(Plugins)) {
-        if (PROTECTED_PLUGIN_NAMES.has(pluginName)) continue;
-        if (!isPluginRuntimeEnabled(pluginName, plugin)) continue;
-
-        const normalizedName = normalizeSearchText(pluginName);
-        const lowerName = pluginName.toLowerCase();
-        const pathTokens = [
-            `plugins/${lowerName}`,
-            `plugins\\${lowerName}`,
-            `illegalcordplugins/${lowerName}`,
-            `illegalcordplugins\\${lowerName}`,
-            `userplugins/${lowerName}`,
-            `userplugins\\${lowerName}`,
-            `equicordplugins/${lowerName}`,
-            `equicordplugins\\${lowerName}`
-        ];
-
-        if (pathTokens.some(token => searchText.includes(token))) {
-            return applyRepeatedCrashBoost({
-                name: pluginName,
-                confidence: "high",
-                source: "stack-path",
-                reason: "The crash stack references this plugin path."
-            });
-        }
-
-        if (normalizedName.length >= 6 && compactSearchText.includes(normalizedName)) {
-            return applyRepeatedCrashBoost({
-                name: pluginName,
-                confidence: "medium",
-                source: "stack-name",
-                reason: "The crash stack references this plugin name."
-            });
-        }
-    }
-
-    const breadcrumbDetection = getLatestBreadcrumbDetection();
-    return breadcrumbDetection ? applyRepeatedCrashBoost(breadcrumbDetection) : undefined;
 }
 
 function maybeDisableSuspectedPlugin(report: CrashReport) {
@@ -755,9 +749,11 @@ function maybeDisableSuspectedPlugin(report: CrashReport) {
     const stopped = plugin.started ? stopPlugin(plugin) : true;
 
     report.disabledPlugin = report.suspectedPlugin;
-    report.disableReason = stopped
-        ? "The suspected plugin was disabled automatically."
-        : "The suspected plugin was disabled for next startup, but stopping it immediately failed.";
+    report.disableReason = !stopped
+        ? "The suspected plugin was disabled for next startup, but stopping it immediately failed."
+        : pluginRequiresRestart(plugin)
+            ? "The suspected plugin was disabled. Restart the client to remove its patches."
+            : "The suspected plugin was disabled automatically.";
 }
 
 function buildCrashLogContents(report: CrashReport) {
@@ -782,7 +778,7 @@ function writeCrashLog(report: CrashReport) {
                 }
 
                 report.logFilePath = result.filePath;
-                saveReport(report);
+                if (latestReport?.id === report.id) saveReport(report);
             } catch (err) {
                 logger.error("Failed to write crash log.", err);
             }
@@ -821,19 +817,11 @@ function openCrashLogsFolder() {
 
 function handleCrash(boundary: CrashBoundary, errorState: CrashErrorState) {
     const report = createReport(errorState);
-    const suspectedPlugin = detectSuspectedPlugin(errorState);
-
-    if (suspectedPlugin) {
-        report.suspectedPlugin = suspectedPlugin.name;
-        report.suspectedPluginReason = suspectedPlugin.reason;
-        report.suspectedPluginConfidence = suspectedPlugin.confidence;
-        report.suspectedPluginSource = suspectedPlugin.source;
-        rememberPluginCrash(suspectedPlugin.name);
-        maybeDisableSuspectedPlugin(report);
-    }
+    maybeDisableSuspectedPlugin(report);
 
     saveReport(report);
     writeCrashLog(report);
+    boundary.setState(errorState);
 
     if (isRecovering) {
         queuedCrash = { boundary, report };
@@ -842,7 +830,8 @@ function handleCrash(boundary: CrashBoundary, errorState: CrashErrorState) {
 
     isRecovering = true;
 
-    setTimeout(() => {
+    recoveryTimer = setTimeout(() => {
+        recoveryTimer = undefined;
         try {
             if (settings.store.promptForUpdates && !hasPromptedForUpdate) {
                 hasPromptedForUpdate = true;
@@ -854,13 +843,14 @@ function handleCrash(boundary: CrashBoundary, errorState: CrashErrorState) {
 
         const latestCrash = queuedCrash ?? { boundary, report };
         queuedCrash = null;
-        latestCrash.report.recovered = settings.store.recoverClient ? recoverCrashBoundary(latestCrash.boundary) : false;
+        latestCrash.report.recovered = settings.store.recoverClient && latestCrash.report.recentCrashCount < 3
+            ? recoverCrashBoundary(latestCrash.boundary) : false;
         saveReport(latestCrash.report);
         writeCrashLog(latestCrash.report);
         isRecovering = false;
         const shouldNotify = shouldNotifyCrash(latestCrash.report);
 
-        if (shouldNotify && settings.store.showRecoveryToast) {
+        if (shouldNotify && settings.store.showRecoveryToast && !settings.store.showSupportPopup) {
             try {
                 showNotification({
                     color: latestCrash.report.recovered ? "#43b581" : "#f23f43",
@@ -873,11 +863,11 @@ function handleCrash(boundary: CrashBoundary, errorState: CrashErrorState) {
             }
         }
 
-        if (shouldNotify && settings.store.showRecoveryToast) {
+        if (shouldNotify && settings.store.showRecoveryToast && !settings.store.showSupportPopup) {
             rememberCrashNotification(latestCrash.report);
         }
 
-        if (settings.store.showSupportPopup) {
+        if (settings.store.showSupportPopup && !supportScreenMounted) {
             openCrashSupportModal(latestCrash.report);
         }
     }, 50);
@@ -924,22 +914,30 @@ function isIgnorableUnhandledRejection(error: unknown) {
 }
 
 function handleGlobalError(event: ErrorEvent) {
-    if (!settings.store.captureGlobalErrors) return;
-
     const error = normalizeGlobalError(event.error, event.message || "Window error.");
     if (isIgnorableGlobalError(error)) return;
 
-    logger.debug("Window error outside Discord crash boundary.", error);
+    if (settings.store.captureGlobalErrors) logger.debug("Window error outside Discord crash boundary.", error);
+    if (settings.store.detectBlankScreen) reportScreenFailure(error);
+}
+
+function reportScreenFailure(error: unknown) {
+    if (isRecovering || (latestReport && Date.now() - latestReport.timestamp < 5000)) return;
+
+    const report = createReport({ error });
+    maybeDisableSuspectedPlugin(report);
+    saveReport(report);
+    writeCrashLog(report);
+    if (settings.store.showSupportPopup && !supportScreenMounted) openCrashSupportModal(report);
 }
 
 function handleUnhandledRejection(event: PromiseRejectionEvent) {
-    if (!settings.store.captureGlobalErrors) return;
-
     if (isIgnorableUnhandledRejection(event.reason)) return;
 
     const error = normalizeGlobalError(event.reason, "Unhandled promise rejection.");
 
-    logger.debug("Unhandled rejection outside Discord crash boundary.", error);
+    if (settings.store.captureGlobalErrors) logger.debug("Unhandled rejection outside Discord crash boundary.", error);
+    if (settings.store.detectBlankScreen && detectSuspectedPlugin({ error })?.confidence === "high") reportScreenFailure(error);
 }
 
 function installGlobalListeners() {
@@ -1058,6 +1056,9 @@ function CrashSupportModal({ modalProps, report }: CrashSupportModalProps) {
                             Suspected plugin: {report.suspectedPlugin}
                         </BaseText>
                         <BaseText tag="p" size="sm" color="text-muted" className={cl("error")}>
+                            Plugin category: {report.suspectedPluginCategory}
+                        </BaseText>
+                        <BaseText tag="p" size="sm" color="text-muted" className={cl("error")}>
                             Confidence: {report.suspectedPluginConfidence} via {report.suspectedPluginSource}
                         </BaseText>
                         <BaseText tag="p" size="sm" color="text-muted" className={cl("error")}>
@@ -1093,7 +1094,50 @@ function CrashSupportModal({ modalProps, report }: CrashSupportModalProps) {
     );
 }
 
-const SafeCrashSupportModal = ErrorBoundary.wrap(CrashSupportModal, { noop: true });
+function CrashSupportFallback() {
+    return (
+        <div className={cl("fallback")} role="alertdialog" aria-modal="true" aria-label="Illegalcord crash recovery">
+            <BaseText size="lg" weight="semibold">Illegalcord caught a crash</BaseText>
+            <BaseText tag="p">Discord could not display the support popup. Copy the report or restart the client.</BaseText>
+            <Flex gap="8px">
+                <Button onClick={copyLatestReport}>Copy report</Button>
+                <Button onClick={relaunch}>Restart client</Button>
+            </Flex>
+        </div>
+    );
+}
+
+const SafeCrashSupportModal = ErrorBoundary.wrap(CrashSupportModal, { fallback: CrashSupportFallback });
+
+function CrashSupportScreen({ empty }: { empty: boolean; }) {
+    const { showSupportPopup, detectBlankScreen } = settings.use(SCREEN_SETTINGS_KEYS);
+    const [dismissedReport, setDismissedReport] = React.useState<string>();
+
+    React.useEffect(() => {
+        supportScreenMounted = true;
+        return () => { supportScreenMounted = false; };
+    }, []);
+
+    React.useEffect(() => {
+        if (!empty || !detectBlankScreen) return;
+        const timer = setTimeout(() => reportScreenFailure(new Error("Discord rendered an empty screen.")), 1500);
+        return () => clearTimeout(timer);
+    }, [empty, detectBlankScreen]);
+
+    const report = latestReport;
+    if (!showSupportPopup || !report || report.id === dismissedReport) return null;
+
+    return (
+        <div className={cl("overlay")}>
+            <SafeCrashSupportModal
+                report={report}
+                modalProps={{ transitionState: 1, onClose: () => setDismissedReport(report.id) }}
+            />
+        </div>
+    );
+}
+
+const SafeCrashSupportScreen = ErrorBoundary.wrap(CrashSupportScreen, { noop: true });
 
 function openCrashSupportModal(report: CrashReport) {
     if (crashModalOpen) return;
@@ -1130,22 +1174,20 @@ function clearDrafts() {
 function recoverCrashBoundary(boundary: CrashBoundary) {
     DataStore.del("KeepCurrentChannel_previousData");
 
-    const steps = [
-        runRecoveryStep("clear message drafts", clearDrafts),
-        runRecoveryStep("close the expression picker", () => ExpressionPickerStore.closeExpressionPicker()),
-        runRecoveryStep("close context menus", () => FluxDispatcher.dispatch({ type: "CONTEXT_MENU_CLOSE" })),
-        runRecoveryStep("close stacked modals", () => ModalStack.popAll()),
-        runRecoveryStep("close open modals", closeAllModals),
-        runRecoveryStep("close user profile overlays", () => FluxDispatcher.dispatch({ type: "USER_PROFILE_MODAL_CLOSE" })),
-        runRecoveryStep("close open layers", () => FluxDispatcher.dispatch({ type: "LAYER_POP_ALL" })),
-    ];
+    runRecoveryStep("clear message drafts", clearDrafts);
+    runRecoveryStep("close the expression picker", () => ExpressionPickerStore.closeExpressionPicker());
+    runRecoveryStep("close context menus", () => FluxDispatcher.dispatch({ type: "CONTEXT_MENU_CLOSE" }));
+    runRecoveryStep("close stacked modals", () => ModalStack.popAll());
+    runRecoveryStep("close open modals", closeAllModals);
+    runRecoveryStep("close user profile overlays", () => FluxDispatcher.dispatch({ type: "USER_PROFILE_MODAL_CLOSE" }));
+    runRecoveryStep("close open layers", () => FluxDispatcher.dispatch({ type: "LAYER_POP_ALL" }));
 
     if (settings.store.navigateHomeOnCrash) {
-        steps.push(runRecoveryStep("return to direct messages", () => NavigationRouter.transitionToGuild("@me")));
+        runRecoveryStep("return to direct messages", () => NavigationRouter.transitionToGuild("@me"));
     }
 
     const stateRecovered = runRecoveryStep("reset the crash boundary", () => boundary.setState({ error: null, info: null }));
-    return stateRecovered || steps.some(Boolean);
+    return stateRecovered;
 }
 
 function CrashHandlerSettings() {
@@ -1205,8 +1247,14 @@ export default definePlugin({
     },
 
     stop() {
+        if (recoveryTimer !== undefined) clearTimeout(recoveryTimer);
+        recoveryTimer = undefined;
+        queuedCrash = null;
+        isRecovering = false;
         removeGlobalListeners();
         restoreInstrumentedMethods();
+        pluginErrorOrigins = new WeakMap();
+        pluginBreadcrumbs = [];
     },
 
     patches: [
@@ -1216,8 +1264,18 @@ export default definePlugin({
                 match: /(?:this\.setState\(|Vencord\.Plugins\.plugins\["CrashHandler"\]\.handleCrash\(this,)(.{0,300}?)\)/,
                 replace: "$self.handleCrash(this,$1)"
             }
+        },
+        {
+            find: "#{intl::ERRORS_UNEXPECTED_CRASH}",
+            replacement: {
+                match: /render\(\)\{(?=.{0,150}?this\.state)/,
+                replace: "render(){return $self.renderRoot(this.vcCrashHandlerRender())}vcCrashHandlerRender(){"
+            }
         }
     ],
 
-    handleCrash
+    handleCrash,
+    renderRoot(children: ReactNode) {
+        return <>{children}<SafeCrashSupportScreen empty={children == null || typeof children === "boolean" || children === "" || (Array.isArray(children) && children.length === 0)} /></>;
+    }
 });

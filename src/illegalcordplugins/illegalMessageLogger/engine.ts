@@ -121,10 +121,9 @@ export function flushQueuedLogs() {
     pendingWrites.clear();
     pendingDeletes.clear();
 
-    flushChain = flushChain
-        .then(() => applyBatch(records, deletedIds))
-        .catch(error => logger.error("Failed to flush queued logs.", error));
-    return flushChain;
+    const flush = flushChain.then(() => applyBatch(records, deletedIds));
+    flushChain = flush.catch(error => logger.error("Failed to flush queued logs.", error));
+    return flush;
 }
 
 async function performMaintenance() {
@@ -237,13 +236,7 @@ export async function deleteManyLogs(ids: string[]) {
 }
 
 export async function clearAllLogs(includeProtected = false) {
-    if (flushTimer !== undefined) {
-        clearTimeout(flushTimer);
-        flushTimer = undefined;
-    }
-    pendingWrites.clear();
-    pendingDeletes.clear();
-    await flushChain;
+    await flushQueuedLogs();
     if (includeProtected) await clearLogs();
     else await clearUnprotectedLogs();
 }

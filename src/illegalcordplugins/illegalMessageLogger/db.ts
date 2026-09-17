@@ -72,10 +72,13 @@ export async function getLogPage(status: LogViewStatus, newest: boolean, limit: 
     let next = await transaction.store.openCursor(range, direction);
     let lastScannedId: string | undefined;
 
-    while (next && records.length < limit) {
+    while (next) {
         const record = next.value;
+        if ((status === "ALL" || record.status === status) && matchesSearch(record)) {
+            if (records.length === limit) break;
+            records.push(record);
+        }
         lastScannedId = record.message_id;
-        if ((status === "ALL" || record.status === status) && matchesSearch(record)) records.push(record);
         next = await next.continue();
     }
 

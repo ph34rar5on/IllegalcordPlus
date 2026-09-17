@@ -8,11 +8,12 @@ import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { AttachmentIcon, LogsIcon } from "@components/Icons";
 import { copyWithToast, openUserProfile } from "@utils/discord";
+import { parseUrl } from "@utils/misc";
 import type { RenderModalProps } from "@vencord/discord-types";
-import { Alerts, ChannelStore, GuildStore, MaskedLink, Modal, NavigationRouter, openModal, Parser, ScrollerThin, showToast, TextInput, Toasts, useEffect, useState } from "@webpack/common";
+import { Alerts, ChannelStore, GuildStore, lodash, MaskedLink, Modal, NavigationRouter, openModal, Parser, ScrollerThin, showToast, TextInput, Toasts, useEffect, useRef, useState } from "@webpack/common";
 
 import { getLogPage, getLogStats, setLogProtected, setLogsProtected } from "./db";
-import { clearAllLogs, deleteLog, deleteManyLogs } from "./engine";
+import { clearAllLogs, deleteLog, deleteManyLogs, flushQueuedLogs } from "./engine";
 import { exportLogRecords, exportLogs, importLogs } from "./io";
 import { settings } from "./settings";
 import { LogRecord, LogStats, LogStatus, LogViewStatus } from "./types";
@@ -46,37 +47,45 @@ interface LogEntryProps {
     record: LogRecord;
     onDelete: (id: string) => void;
     onProtect: (id: string, value: boolean) => void;
+    busy: boolean;
 }
 
-function LogEntry({ record, onDelete, onProtect }: LogEntryProps) {
+function LogEntry({ record, onDelete, onProtect, busy }: LogEntryProps) {
     const { message, status } = record;
+    const [expanded, setExpanded] = useState(false);
+    const longContent = message.content.length > 600 || message.content.split("\n").length > 8;
     const channel = ChannelStore.getChannel(message.channel_id);
     const guild = GuildStore.getGuild(message.guild_id ?? message.guildId ?? channel?.guild_id);
     const authorName = message.author.global_name ?? message.author.globalName ?? message.author.username;
     const location = guild && channel
         ? `#${channel.name} in ${guild.name}`
-        : channel?.name ?? "Direct messages";
+        : channel?.name || (guild ? `Channel ${message.channel_id} in ${guild.name}` : message.guild_id || message.guildId ? `Channel ${message.channel_id}` : "Direct messages");
 
     return (
-        <article className={cl("entry", { protected: record.protected })}>
+        <article className={cl("entry", STATUS_CLASSES[status], { protected: record.protected })}>
             <div className={cl("entry-header")}>
                 <div className={cl("identity")}>
-                    <strong className={cl("author")}>{authorName}</strong>
+                    <strong className={cl("author")} title={message.author.id}>{authorName}</strong>
                     <span className={cl("location")} title={location}>{location}</span>
                 </div>
                 <span className={cl("status", STATUS_CLASSES[status])}>{STATUS_LABELS[status]}</span>
             </div>
-            <div className={cl("content")}>
+            <div className={cl("content", { collapsed: longContent && !expanded })}>
                 {message.content ? Parser.parse(message.content) : <span className={cl("muted")}>No text content.</span>}
             </div>
+            {longContent ? <Button size="xs" variant="link" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "Collapse message" : "Show full message"}</Button> : null}
             {message.attachments.length > 0 && (
                 <div className={cl("attachments")}>
-                    {message.attachments.map(attachment => (
-                        <MaskedLink key={attachment.id} href={attachment.url}>
-                            <AttachmentIcon width={14} height={14} />
-                            {attachment.filename}
-                        </MaskedLink>
-                    ))}
+                    {message.attachments.map(attachment => {
+                        const url = parseUrl(attachment.url);
+                        if (!url || !["https:", "http:"].includes(url.protocol)) return null;
+                        return (
+                            <MaskedLink key={attachment.id} href={url.href}>
+                                <AttachmentIcon width={14} height={14} />
+                                {attachment.filename}
+                            </MaskedLink>
+                        );
+                    })}
                 </div>
             )}
             {message.editHistory && message.editHistory.length > 0 && (
@@ -92,7 +101,8 @@ function LogEntry({ record, onDelete, onProtect }: LogEntryProps) {
             )}
             <div className={cl("entry-footer")}>
                 <div className={cl("entry-meta")}>
-                    <time>{new Date(message.timestamp).toLocaleString()}</time>
+                    <time dateTime={message.timestamp} title="Message sent">{new Date(message.timestamp).toLocaleString()}</time>
+                    {record.protected ? <span className={cl("protected-label")}>Protected from cleanup</span> : null}
                     {message.attachments.length > 0 && (
                         <span>{message.attachments.length} attachment{message.attachments.length === 1 ? "" : "s"}</span>
                     )}
@@ -101,13 +111,12 @@ function LogEntry({ record, onDelete, onProtect }: LogEntryProps) {
                     <Button
                         size="xs"
                         variant={record.protected ? "positive" : "secondary"}
+                        disabled={busy}
                         onClick={() => onProtect(message.id, !record.protected)}
                     >
                         {record.protected ? "Protected" : "Protect"}
                     </Button>
                     <Button size="xs" variant="secondary" title="Copy message text" onClick={() => copyWithToast(message.content)}>Copy</Button>
-                    <Button size="xs" variant="secondary" title="Copy raw message data" onClick={() => copyWithToast(JSON.stringify(message, null, 2))}>Raw</Button>
-                    <Button size="xs" variant="secondary" title="Open author profile" onClick={() => openUserProfile(message.author.id)}>Profile</Button>
                     <Button
                         size="xs"
                         variant="secondary"
@@ -116,12 +125,21 @@ function LogEntry({ record, onDelete, onProtect }: LogEntryProps) {
                     >
                         Open
                     </Button>
-                    <Button size="xs" variant="dangerSecondary" title="Delete this log" onClick={() => onDelete(message.id)}>Delete</Button>
+                    <details className={cl("entry-tools")}>
+                        <summary>More actions</summary>
+                        <div className={cl("actions")}>
+                            <Button size="xs" variant="secondary" title="Copy raw message data" onClick={() => copyWithToast(JSON.stringify(message, null, 2))}>Copy raw data</Button>
+                            <Button size="xs" variant="secondary" onClick={() => openUserProfile(message.author.id)}>Author profile</Button>
+                            <Button size="xs" variant="dangerSecondary" disabled={busy || record.protected} title={record.protected ? "Unprotect this log before deleting it" : "Delete this log"} onClick={() => onDelete(message.id)}>Delete log</Button>
+                        </div>
+                    </details>
                 </div>
             </div>
         </article>
     );
 }
+
+const SafeLogEntry = ErrorBoundary.wrap(LogEntry, { noop: true });
 
 function LogsModal({ modalProps, initialQuery = "" }: LogsModalProps) {
     const [status, setStatus] = useState<LogViewStatus>("ALL");
@@ -133,111 +151,129 @@ function LogsModal({ modalProps, initialQuery = "" }: LogsModalProps) {
     const [total, setTotal] = useState(0);
     const [pending, setPending] = useState(true);
     const [revision, setRevision] = useState(0);
-    const [statsRevision, setStatsRevision] = useState(0);
     const [stats, setStats] = useState<LogStats>();
+    const [protectedOnly, setProtectedOnly] = useState(false);
+    const [attachmentsOnly, setAttachmentsOnly] = useState(false);
+    const [compact, setCompact] = useState(false);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState("");
+    const request = useRef(0);
+    const searchQuery = [query, protectedOnly ? "is:protected" : "", attachmentsOnly ? "has:attachment" : ""].filter(Boolean).join(" ");
+    const unprotectedCount = records.filter(record => !record.protected).length;
+    const hasFilters = Boolean(query || protectedOnly || attachmentsOnly || status !== "ALL");
 
     useEffect(() => {
-        let active = true;
+        const currentRequest = ++request.current;
         setPending(true);
+        setRecords([]);
+        setCursor(undefined);
+        setHasMore(false);
+        setError("");
 
-        const timeout = setTimeout(() => {
-            getLogPage(status, newest, settings.store.pageSize, query)
-                .then(page => {
-                    if (!active) return;
-                    setRecords(page.records);
-                    setCursor(page.cursor);
-                    setHasMore(page.hasMore);
-                    setTotal(page.total);
-                    setPending(false);
-                })
-                .catch(() => {
-                    if (active) setPending(false);
-                });
+        const load = lodash.debounce(async () => {
+            try {
+                await flushQueuedLogs();
+                const [page, summary] = await Promise.all([getLogPage(status, newest, settings.store.pageSize, searchQuery), getLogStats()]);
+                if (currentRequest !== request.current) return;
+                setRecords(page.records);
+                setCursor(page.cursor);
+                setHasMore(page.hasMore);
+                setTotal(page.total);
+                setStats(summary);
+            } catch {
+                if (currentRequest === request.current) setError("Could not load the message logs. Try refreshing the archive.");
+            } finally {
+                if (currentRequest === request.current) setPending(false);
+            }
         }, 250);
+        load();
 
         return () => {
-            active = false;
-            clearTimeout(timeout);
+            request.current++;
+            load.cancel();
         };
-    }, [status, query, newest, revision]);
-
-    useEffect(() => {
-        let active = true;
-        getLogStats().then(value => {
-            if (active) setStats(value);
-        });
-        return () => {
-            active = false;
-        };
-    }, [statsRevision]);
+    }, [status, searchQuery, newest, revision]);
 
     function refresh() {
         setRevision(current => current + 1);
-        setStatsRevision(current => current + 1);
     }
 
     async function loadMore() {
         if (!cursor || pending) return;
+        const currentRequest = request.current;
         setPending(true);
-        const page = await getLogPage(status, newest, settings.store.pageSize, query, cursor);
-        setRecords(current => [...current, ...page.records]);
-        setCursor(page.cursor);
-        setHasMore(page.hasMore);
-        setPending(false);
+        setError("");
+        try {
+            const page = await getLogPage(status, newest, settings.store.pageSize, searchQuery, cursor);
+            if (currentRequest !== request.current) return;
+            setRecords(current => [...current, ...page.records]);
+            setCursor(page.cursor);
+            setHasMore(page.hasMore);
+        } catch {
+            if (currentRequest === request.current) setError("Could not load more logs. Your loaded results are still available.");
+        } finally {
+            if (currentRequest === request.current) setPending(false);
+        }
     }
 
-    async function removeLog(id: string) {
-        await deleteLog(id);
-        setRecords(current => current.filter(record => record.message_id !== id));
-        setTotal(current => Math.max(0, current - 1));
-        setStatsRevision(current => current + 1);
+    async function runAction(action: () => Promise<unknown>) {
+        if (busy) return;
+        setBusy(true);
+        try {
+            await action();
+            refresh();
+        } catch (error) {
+            showToast(error instanceof Error ? error.message : "The log action failed. Please try again.", Toasts.Type.FAILURE);
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    function removeLog(id: string) {
+        Alerts.show({
+            title: "Delete this log?",
+            body: "This removes the saved log and its edit history from this device.",
+            confirmText: "Delete log",
+            confirmVariant: "critical-primary",
+            cancelText: "Cancel",
+            onConfirm: () => runAction(() => deleteLog(id))
+        });
     }
 
     async function protectLog(id: string, value: boolean) {
-        const updated = await setLogProtected(id, value);
-        if (!updated) return;
-        setRecords(current => current.map(record => record.message_id === id ? updated : record));
-        setStatsRevision(current => current + 1);
+        await runAction(() => setLogProtected(id, value));
     }
 
     async function exportBackup() {
-        try {
+        await runAction(async () => {
+            await flushQueuedLogs();
             const count = await exportLogs();
             showToast(`Exported ${count} message logs.`, Toasts.Type.SUCCESS);
-        } catch (error) {
-            showToast(error instanceof Error ? error.message : "Failed to export message logs.", Toasts.Type.FAILURE);
-        }
+        });
     }
 
     async function importBackup() {
-        try {
+        await runAction(async () => {
             const count = await importLogs();
             if (count == null) return;
             showToast(`Imported ${count} message logs.`, Toasts.Type.SUCCESS);
-            refresh();
-        } catch (error) {
-            showToast(error instanceof Error ? error.message : "Failed to import message logs.", Toasts.Type.FAILURE);
-        }
+        });
     }
 
     async function protectVisible(value: boolean) {
         const ids = records.map(record => record.message_id);
-        await setLogsProtected(ids, value);
-        setRecords(current => current.map(record => ({ ...record, protected: value })));
-        setStatsRevision(current => current + 1);
+        await runAction(() => setLogsProtected(ids, value));
     }
 
     function confirmClearVisible() {
+        const ids = records.filter(record => !record.protected).map(record => record.message_id);
         Alerts.show({
-            title: "Clear visible logs",
-            body: `Remove the ${records.length} currently loaded logs?`,
+            title: "Clear loaded logs",
+            body: `Remove ${ids.length} unprotected logs from the loaded results? Protected entries will be kept.`,
             confirmText: "Clear",
             confirmVariant: "critical-primary",
             cancelText: "Cancel",
-            onConfirm: async () => {
-                await deleteManyLogs(records.filter(record => !record.protected).map(record => record.message_id));
-                refresh();
-            }
+            onConfirm: () => runAction(() => deleteManyLogs(ids))
         });
     }
 
@@ -248,55 +284,54 @@ function LogsModal({ modalProps, initialQuery = "" }: LogsModalProps) {
             confirmText: "Clear unprotected",
             confirmVariant: "critical-primary",
             cancelText: "Cancel",
-            onConfirm: async () => {
-                await clearAllLogs();
-                refresh();
-            }
+            onConfirm: () => runAction(() => clearAllLogs())
         });
+    }
+
+    function resetFilters() {
+        setQuery("");
+        setStatus("ALL");
+        setProtectedOnly(false);
+        setAttachmentsOnly(false);
     }
 
     return (
         <Modal
             {...modalProps}
-            size="lg"
+            size="xl"
             title="Illegal Message Logger"
-            actions={[
-                { text: "Clear visible", variant: "critical-secondary", disabled: records.length === 0, onClick: confirmClearVisible },
-                { text: "Clear unprotected", variant: "critical-primary", onClick: confirmClearAll }
-            ]}
+            subtitle="Browse deleted messages, edit history, and ghost pings saved on this device."
+            actions={[{ text: "Done", variant: "secondary", onClick: modalProps.onClose }]}
         >
-            <div className={cl("root")}>
+            <div className={cl("root", { compact })}>
                 <div className={cl("toolbar")}>
                     <div className={cl("overview")}>
-                        <div>
-                            <strong>{total.toLocaleString()} matching log{total === 1 ? "" : "s"}</strong>
-                            <span>{records.length === total ? "All results loaded" : `Showing ${records.length.toLocaleString()} loaded results`}</span>
+                        <div aria-live="polite">
+                            <strong>{pending ? "Loading archive…" : error && records.length === 0 ? "Archive unavailable" : `${records.length.toLocaleString()}${hasMore ? "+" : ""} matching log${records.length === 1 && !hasMore ? "" : "s"}`}</strong>
+                            <span>{pending ? "Searching saved messages" : error ? "Refresh to try again" : `${hasMore ? "More matches available below" : "All matching results loaded"} · ${total.toLocaleString()} saved in this category`}</span>
                         </div>
-                        <Button
-                            className={cl("sort")}
-                            size="small"
-                            variant="secondary"
-                            onClick={() => setNewest(value => !value)}
-                        >
-                            {newest ? "Newest first" : "Oldest first"}
-                        </Button>
+                        <div className={cl("view-actions")}>
+                            <Button size="small" variant="secondary" aria-pressed={compact} onClick={() => setCompact(value => !value)}>{compact ? "Comfortable view" : "Compact view"}</Button>
+                            <Button
+                                className={cl("sort")}
+                                size="small"
+                                variant="secondary"
+                                onClick={() => setNewest(value => !value)}
+                            >
+                                {newest ? "Newest first" : "Oldest first"}
+                            </Button>
+                            <Button size="small" variant="secondary" disabled={pending || busy} onClick={refresh}>Refresh</Button>
+                        </div>
                     </div>
-                    {stats && (
-                        <div className={cl("stats")}>
-                            <span><strong>{stats.total.toLocaleString()}</strong> Total</span>
-                            <span><strong>{stats.deleted.toLocaleString()}</strong> Deleted</span>
-                            <span><strong>{stats.edited.toLocaleString()}</strong> Edited</span>
-                            <span><strong>{stats.ghostPinged.toLocaleString()}</strong> Ghost pings</span>
-                            <span><strong>{stats.protected.toLocaleString()}</strong> Protected</span>
-                            <span><strong>{formatBytes(stats.estimatedBytes)}</strong> Storage</span>
-                        </div>
-                    )}
-                    <TextInput
-                        aria-label="Search message logs"
-                        value={query}
-                        onChange={setQuery}
-                        placeholder="Search content, author, channel, server, or ID"
-                    />
+                    <div className={cl("search-row")}>
+                        <TextInput
+                            aria-label="Search message logs"
+                            value={query}
+                            onChange={setQuery}
+                            placeholder="Search messages, previous versions, people, or channels…"
+                        />
+                        <Button size="small" variant="secondary" disabled={!hasFilters} onClick={resetFilters}>Reset filters</Button>
+                    </div>
                     <div className={cl("filters")}>
                         <span className={cl("section-label")}>Filter</span>
                         <div className={cl("tabs")}>
@@ -313,26 +348,47 @@ function LogsModal({ modalProps, initialQuery = "" }: LogsModalProps) {
                             ))}
                         </div>
                     </div>
-                    <details className={cl("search-help")}>
-                        <summary>Advanced search syntax</summary>
-                        <span><code>from:</code>, <code>channel:</code>, <code>guild:</code>, <code>id:</code>, <code>before:</code>, <code>after:</code>, <code>has:attachment</code>, <code>has:embed</code>, <code>has:link</code>, <code>has:edit</code>, <code>is:protected</code>, <code>is:deleted</code>, <code>is:edited</code>, <code>is:ghost</code>. Prefix a term with <code>-</code> to exclude it.</span>
-                    </details>
-                    <div className={cl("backup-actions")}>
-                        <span className={cl("section-label")}>Manage data</span>
-                        <Button size="small" variant="secondary" onClick={exportBackup}>Export backup</Button>
-                        <Button size="small" variant="secondary" disabled={records.length === 0} onClick={() => exportLogRecords(records, "illegal-message-logger-visible")}>Export visible</Button>
-                        <Button size="small" variant="secondary" onClick={importBackup}>Import backup</Button>
-                        <Button size="small" variant="secondary" disabled={records.length === 0} onClick={() => protectVisible(true)}>Protect visible</Button>
-                        <Button size="small" variant="secondary" disabled={records.length === 0} onClick={() => protectVisible(false)}>Unprotect visible</Button>
+                    <div className={cl("quick-filters")}>
+                        <Button size="xs" variant={protectedOnly ? "positive" : "secondary"} aria-pressed={protectedOnly} onClick={() => setProtectedOnly(value => !value)}>Protected only</Button>
+                        <Button size="xs" variant={attachmentsOnly ? "primary" : "secondary"} aria-pressed={attachmentsOnly} onClick={() => setAttachmentsOnly(value => !value)}><AttachmentIcon width={14} height={14} /> With attachments</Button>
+                        <details className={cl("search-help")}>
+                            <summary>Advanced search syntax</summary>
+                            <span><code>from:</code>, <code>channel:</code>, <code>guild:</code>, <code>id:</code>, <code>before:2026-09-01</code>, <code>after:</code>, <code>has:attachment</code>, <code>has:embed</code>, <code>has:link</code>, <code>has:edit</code>, <code>is:protected</code>, <code>is:deleted</code>, <code>is:edited</code>, <code>is:ghost</code>. Use quotes for phrases and prefix a term with <code>-</code> to exclude it, for example <code>{'-"not this phrase"'}</code>.</span>
+                        </details>
                     </div>
+                    <details className={cl("management")}>
+                        <summary>Archive overview and tools <span>{busy ? "Working…" : `${records.length} loaded logs`}</span></summary>
+                        {stats && (
+                            <div className={cl("stats")}>
+                                <span><strong>{stats.total.toLocaleString()}</strong> Total</span>
+                                <span><strong>{stats.deleted.toLocaleString()}</strong> Deleted</span>
+                                <span><strong>{stats.edited.toLocaleString()}</strong> Edited</span>
+                                <span><strong>{stats.ghostPinged.toLocaleString()}</strong> Ghost pings</span>
+                                <span><strong>{stats.protected.toLocaleString()}</strong> Protected</span>
+                                <span><strong>{formatBytes(stats.estimatedBytes)}</strong> Storage</span>
+                            </div>
+                        )}
+                        <div className={cl("backup-actions")}>
+                            <Button size="small" variant="secondary" disabled={busy} onClick={exportBackup}>Export all</Button>
+                            <Button size="small" variant="secondary" disabled={busy || pending || records.length === 0} onClick={() => exportLogRecords(records, "illegal-message-logger-visible")}>Export loaded</Button>
+                            <Button size="small" variant="secondary" disabled={busy} onClick={importBackup}>Import backup</Button>
+                            <Button size="small" variant="secondary" disabled={busy || pending || records.length === 0} onClick={() => protectVisible(true)}>Protect loaded</Button>
+                            <Button size="small" variant="secondary" disabled={busy || pending || records.length === 0} onClick={() => protectVisible(false)}>Unprotect loaded</Button>
+                            <Button size="small" variant="dangerSecondary" disabled={busy || pending || unprotectedCount === 0} onClick={confirmClearVisible}>Clear loaded</Button>
+                            <Button size="small" variant="dangerSecondary" disabled={busy || pending || !stats || stats.total === stats.protected} onClick={confirmClearAll}>Clear all unprotected</Button>
+                        </div>
+                        <p>Actions labeled “loaded” affect only loaded results. “Clear all unprotected” affects the entire archive. Full backups include all saved logs and their message content.</p>
+                    </details>
                 </div>
-                <ScrollerThin fade className={cl("scroller")}>
-                    {records.map(record => <LogEntry key={record.message_id} record={record} onDelete={removeLog} onProtect={protectLog} />)}
-                    {!pending && records.length === 0 && (
+                <ScrollerThin fade className={cl("scroller")} aria-busy={pending}>
+                    {error ? <div className={cl("error")} role="alert"><strong>Archive unavailable</strong><span>{error}</span><Button size="small" variant="secondary" onClick={refresh}>Retry</Button></div> : null}
+                    {records.map(record => <SafeLogEntry key={record.message_id} record={record} onDelete={removeLog} onProtect={protectLog} busy={busy || pending} />)}
+                    {!pending && !error && records.length === 0 && (
                         <div className={cl("empty")}>
                             <LogsIcon width={36} height={36} />
                             <strong>No matching logs</strong>
                             <span>Try another filter or search query.</span>
+                            {hasFilters ? <Button size="small" variant="secondary" onClick={resetFilters}>Show all logs</Button> : null}
                         </div>
                     )}
                     {pending && <div className={cl("empty")}><span>Loading logs…</span></div>}
