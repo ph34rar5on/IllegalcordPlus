@@ -148,14 +148,14 @@ if %ERRORLEVEL% neq 0 (
 )
 
 REM ==================================================
-REM 7. Merge upstream/dev
+REM 7. Merge upstream/main
 REM ==================================================
 
 echo.
-echo 🔀 Merging upstream/dev into main...
+echo 🔀 Merging upstream/main into main...
 echo.
 
-git -c core.editor=true merge upstream/dev --no-edit --no-ff -m "Merge upstream/dev"
+git -c core.editor=true merge upstream/main --no-edit --no-ff -m "Merge upstream/main"
 
 if %ERRORLEVEL% neq 0 (
     echo.
@@ -183,7 +183,7 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo.
-echo ✅ Successfully merged upstream/dev.
+echo ✅ Successfully merged upstream/main.
 
 REM ==================================================
 REM 8. Push to your fork
@@ -224,7 +224,7 @@ echo Upstream:
 echo   ImHisako/Illegalcord
 echo.
 echo Branch:
-echo   upstream/dev → main
+echo   upstream/main → main
 echo.
 echo Fork:
 echo   ph34rar5on/IllegalcordPlus
