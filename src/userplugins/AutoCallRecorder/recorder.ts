@@ -197,6 +197,9 @@ export async function startRecording(opts: RecordingOptions): Promise<boolean> {
                 }
             } catch (err) {
                 console.warn("[AutoCallRecorder] Mic capture failed:", err);
+                if (err instanceof DOMException && err.name === "NotAllowedError") {
+                    Toasts.show(Toasts.create(t("Microphone access is blocked, so your voice will not be recorded."), Toasts.Type.FAILURE));
+                }
             }
         }
 
@@ -276,6 +279,9 @@ export async function startRecording(opts: RecordingOptions): Promise<boolean> {
             }
         } catch (e) {
             console.warn("[AutoCallRecorder] Desktop loopback capture failed:", e);
+            if (e instanceof DOMException && e.name === "NotAllowedError") {
+                Toasts.show(Toasts.create(t("System audio capture is blocked, so the other people in the call will not be recorded."), Toasts.Type.FAILURE));
+            }
         }
 
         // Failsafe: if neither mic nor system audio could be captured, attach a silent oscillator so recorder runs reliably
