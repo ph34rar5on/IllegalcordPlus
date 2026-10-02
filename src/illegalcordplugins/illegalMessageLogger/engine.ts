@@ -41,7 +41,7 @@ function hasToJS(message: Message | MessageJSON): message is Message & MessageWi
 
 function snapshotMessage(message: Message | MessageJSON): LoggedMessage {
     const raw = hasToJS(message) ? message.toJS() : message;
-    const copy = lodash.cloneDeep(raw) as LoggedMessage;
+    const copy = { ...raw, author: { ...raw.author } } as LoggedMessage;
     const { timestamp } = copy;
 
     copy.timestamp = new Date(String(timestamp)).toISOString();
@@ -56,17 +56,18 @@ function snapshotMessage(message: Message | MessageJSON): LoggedMessage {
     delete copy.__messageloggerDiffKey;
     delete copy.__messageloggerAggregated;
     delete copy.__messageloggerLastAppliedKey;
-    return copy;
+    return lodash.cloneDeep(copy);
 }
 
 function remember(message: LoggedMessage) {
-    while (!recentMessages.has(message.id) && recentMessages.size >= settings.store.memoryCacheLimit) {
+    const { memoryCacheLimit } = settings.store;
+    recentMessages.delete(message.id);
+    while (recentMessages.size >= memoryCacheLimit) {
         const oldestId = recentMessages.keys().next().value;
         if (!oldestId) break;
         recentMessages.delete(oldestId);
     }
 
-    recentMessages.delete(message.id);
     recentMessages.set(message.id, message);
 }
 
@@ -90,7 +91,7 @@ function queueRecord(message: LoggedMessage, status: LogStatus) {
         : status;
     const pendingHistory = pending?.message.editHistory ?? [];
     const messageHistory = message.editHistory ?? [];
-    if (pendingHistory.length > messageHistory.length) message.editHistory = pendingHistory;
+    if (pendingHistory.length > messageHistory.length) message = { ...message, editHistory: pendingHistory };
 
     pendingDeletes.delete(message.id);
     pendingWrites.set(message.id, {
@@ -115,13 +116,17 @@ export function flushQueuedLogs() {
         clearTimeout(flushTimer);
         flushTimer = undefined;
     }
+    if (pendingWrites.size === 0 && pendingDeletes.size === 0) return flushChain;
 
     const records = [...pendingWrites.values()];
     const deletedIds = [...pendingDeletes];
     pendingWrites.clear();
     pendingDeletes.clear();
 
-    const flush = flushChain.then(() => applyBatch(records, deletedIds));
+    const flush = flushChain.then(async () => {
+        await applyBatch(records, deletedIds);
+        if (records.length > 0 && settings.store.messageLimit > 0) await runMaintenance(settings.store.messageLimit, 0);
+    });
     flushChain = flush.catch(error => logger.error("Failed to flush queued logs.", error));
     return flush;
 }
@@ -143,6 +148,9 @@ async function performMaintenance() {
 
 export function handleMessageCreate(payload: MessageCreatePayload) {
     if (!active) return;
+    const { saveEdits, saveDeletes, saveGhostPings } = settings.store;
+    if ((!saveEdits || MessageLogger.shouldIgnore(payload.message, true))
+        && (!(saveDeletes || saveGhostPings) || MessageLogger.shouldIgnore(payload.message))) return;
 
     const message = snapshotMessage(payload.message);
     message.guildId = payload.guildId;
@@ -153,8 +161,12 @@ export function handleMessageCreate(payload: MessageCreatePayload) {
 export function handleMessageUpdate(payload: MessageUpdatePayload) {
     if (!active || !settings.store.saveEdits || payload.message.content == null) return;
 
-    const storedMessage = MessageStore.getMessage(payload.message.channel_id, payload.message.id);
-    const previous = recentMessages.get(payload.message.id) ?? (storedMessage ? snapshotMessage(storedMessage) : undefined);
+    let previous = recentMessages.get(payload.message.id);
+    if (previous?.content === payload.message.content) return;
+    if (!previous) {
+        const storedMessage = MessageStore.getMessage(payload.message.channel_id, payload.message.id);
+        if (storedMessage) previous = snapshotMessage(storedMessage);
+    }
     if (!previous) return;
     if (previous.content === payload.message.content) {
         if (previous.editHistory?.length && !MessageLogger.shouldIgnore(previous, true)) {
@@ -164,8 +176,7 @@ export function handleMessageUpdate(payload: MessageUpdatePayload) {
         return;
     }
 
-    const message = lodash.cloneDeep(previous);
-    Object.assign(message, payload.message);
+    const message = { ...previous, ...lodash.cloneDeep(payload.message) };
     message.guildId = payload.guildId ?? previous.guildId;
     message.editHistory = [
         ...(previous.editHistory ?? []),
@@ -183,23 +194,25 @@ export function handleMessageUpdate(payload: MessageUpdatePayload) {
 }
 
 function saveDeletedMessage(payload: MessageDeletePayload) {
-    const storedMessage = MessageStore.getMessage(payload.channelId, payload.id);
+    const { saveDeletes, saveGhostPings, notifyGhostPings } = settings.store;
     const cachedMessage = recentMessages.get(payload.id);
-    if (!cachedMessage && !storedMessage) return;
+    recentMessages.delete(payload.id);
+    if (!saveDeletes && !saveGhostPings) return;
+    const previous = cachedMessage ?? MessageStore.getMessage(payload.channelId, payload.id);
+    if (!previous || MessageLogger.shouldIgnore(previous)) return;
 
-    const message = snapshotMessage(cachedMessage ?? storedMessage);
+    const message = cachedMessage ? { ...cachedMessage } : snapshotMessage(previous);
+    const ghostPinged = hasCurrentUserMention(message);
+    if (!saveDeletes && !ghostPinged) return;
     message.guildId = payload.guildId ?? message.guildId;
     message.deleted = true;
     message.deletedTimestamp = new Date().toISOString();
     message.attachments = message.attachments.map(attachment => ({ ...attachment, deleted: true }));
-    const ghostPinged = hasCurrentUserMention(message);
     message.ghostPinged = ghostPinged;
 
-    recentMessages.delete(payload.id);
-    if (MessageLogger.shouldIgnore(message)) return;
-    if (ghostPinged && settings.store.saveGhostPings) {
+    if (ghostPinged && saveGhostPings) {
         queueRecord(message, LogStatus.GHOST_PINGED);
-        if (settings.store.notifyGhostPings) {
+        if (notifyGhostPings) {
             const authorName = message.author.global_name ?? message.author.globalName ?? message.author.username;
             showNotification({
                 title: "Illegal Message Logger",
@@ -207,7 +220,7 @@ function saveDeletedMessage(payload: MessageDeletePayload) {
             });
         }
     }
-    else if (settings.store.saveDeletes) queueRecord(message, LogStatus.DELETED);
+    else if (saveDeletes) queueRecord(message, LogStatus.DELETED);
 }
 
 export function handleMessageDelete(payload: MessageDeletePayload) {
