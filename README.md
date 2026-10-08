@@ -11,6 +11,8 @@ If you are looking for a Discord client that offers greater privacy and more fre
 > [!WARNING]
 > Illegalcord is sometimes labeled as malware simply because it does not enforce the same restrictions as other modified clients. Do not rely on assumptions: the project is fully open source, so you can inspect and verify the code yourself. If, after reviewing it, you consider it safe and suitable for your needs, you are free to install and use it.
 
+Telegram and website represent official channels maintained by ImHisako. This repo may have differences from the remote upstream. Therefore don't expect support from them for unsupoorted issues. 
+
 Telegram and news: https://t.me/Illegalcord
 
 Illegalcord website: https://illegalcord.netlify.app/
@@ -99,6 +101,10 @@ Our included plugins can be found [here](https://equicord.org/plugins).
 - **StreamProofEnhanched**
 - **YMusicSync**
 - **ZeroWidthSanitizer**
+- **AutoCallRecorder**
+- **AutoTranslateNightcord**
+- **MessagePurge**
+- **VoiceJoinLeaveMessages**
 
 </details>
 
