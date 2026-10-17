@@ -10,7 +10,7 @@ import { definePluginSettings } from "@api/Settings";
 import { t } from "@testcordplugins/autoTranslateNightcord";
 import definePlugin, { OptionType, PluginSettingComponentProps } from "@utils/types";
 import { findByPropsLazy, findStoreLazy } from "@webpack";
-import { Avatar, FluxDispatcher, IconUtils, React, RelationshipStore, SelectedChannelStore, Toasts,UserStore } from "@webpack/common";
+import { Avatar, FluxDispatcher, IconUtils, React, RelationshipStore, SelectedChannelStore, showToast,UserStore } from "@webpack/common";
 import { Button, SearchableSelect, TextInput } from "@webpack/common/components";
 
 import { getRecordingDurationMs,isCurrentlyRecording, startRecording, stopRecording } from "./recorder";
@@ -289,7 +289,7 @@ async function handleVoiceStateUpdates(e: any) {
 
         if (update.channelId === lastChannelId) {
             if (isBlacklistedUserInChannel(lastChannelId)) {
-                Toasts.show(Toasts.create(t("Blacklisted user in channel."), Toasts.Type.FAILURE));
+                showToast(t("Blacklisted user in channel."), "failure");
                 await stopRecording();
                 stopUIInterval();
                 break;
@@ -308,7 +308,7 @@ async function handleVoiceChannelSelect(e: any) {
 
     if (newChannelId && lastChannelId !== newChannelId) {
         if (isBlacklistedUserInChannel(newChannelId)) {
-            Toasts.show(Toasts.create(t("Blacklisted user in channel."), Toasts.Type.FAILURE));
+            showToast(t("Blacklisted user in channel."), "failure");
         } else {
             await startRecording({
                 mode: settings.store.mode as any,
@@ -340,7 +340,7 @@ export default definePlugin({
         lastChannelId = getConnectedVoiceChannelId();
         if (lastChannelId) {
             if (isBlacklistedUserInChannel(lastChannelId)) {
-                Toasts.show(Toasts.create(t("Blacklisted user in channel."), Toasts.Type.FAILURE));
+                showToast(t("Blacklisted user in channel."), "failure");
             } else {
                 startRecording({
                     mode: settings.store.mode as any,

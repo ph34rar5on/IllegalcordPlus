@@ -13,7 +13,7 @@ import { Paragraph } from "@components/Paragraph";
 import { classNameFactory } from "@utils/css";
 import { getCurrentChannel, getCurrentGuild } from "@utils/discord";
 import { RenderModalProps } from "@vencord/discord-types";
-import { Alerts, Checkbox, Modal, openModal, ScrollerThin, Select, showToast, TextInput, Toasts, useRef, UserStore, useState } from "@webpack/common";
+import { Alerts, Checkbox, Modal, openModal, ScrollerThin, Select, showToast, TextInput, useRef, UserStore, useState } from "@webpack/common";
 import type { ReactNode } from "react";
 
 import { settings } from ".";
@@ -115,22 +115,22 @@ function PurgeModalInner({ modalProps }: { modalProps: RenderModalProps; }) {
 
     function buildOptions(dryRun: boolean): PurgeOptions | null {
         if (!form.guildId) {
-            showToast("Server ID (or @me for DMs) is required.", Toasts.Type.FAILURE);
+            showToast("Server ID (or @me for DMs) is required.", "failure");
             return null;
         }
         if (form.guildId === "@me" && !form.channelId) {
-            showToast("Channel ID is required for DMs.", Toasts.Type.FAILURE);
+            showToast("Channel ID is required for DMs.", "failure");
             return null;
         }
         if (form.guildId !== "@me" && !form.channelId && !form.authorId && !form.content) {
-            showToast("Provide a Channel ID, Author ID, or content filter to scope a server-wide purge.", Toasts.Type.FAILURE);
+            showToast("Provide a Channel ID, Author ID, or content filter to scope a server-wide purge.", "failure");
             return null;
         }
         if (form.pattern) {
             try {
                 new RegExp(form.pattern, "i");
             } catch {
-                showToast("Invalid regex pattern.", Toasts.Type.FAILURE);
+                showToast("Invalid regex pattern.", "failure");
                 return null;
             }
         }

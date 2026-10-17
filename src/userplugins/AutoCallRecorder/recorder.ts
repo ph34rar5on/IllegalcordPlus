@@ -5,7 +5,7 @@
  */
 
 import { t } from "@testcordplugins/autoTranslateNightcord";
-import { Toasts } from "@webpack/common";
+import { showToast } from "@webpack/common";
 
 import { fixMp4Duration, fixWebmBufferDuration } from "./mediaFixer";
 
@@ -198,7 +198,7 @@ export async function startRecording(opts: RecordingOptions): Promise<boolean> {
             } catch (err) {
                 console.warn("[AutoCallRecorder] Mic capture failed:", err);
                 if (err instanceof DOMException && err.name === "NotAllowedError") {
-                    Toasts.show(Toasts.create(t("Microphone access is blocked, so your voice will not be recorded."), Toasts.Type.FAILURE));
+                    showToast(t("Microphone access is blocked, so your voice will not be recorded."), "failure");
                 }
             }
         }
@@ -280,7 +280,7 @@ export async function startRecording(opts: RecordingOptions): Promise<boolean> {
         } catch (e) {
             console.warn("[AutoCallRecorder] Desktop loopback capture failed:", e);
             if (e instanceof DOMException && e.name === "NotAllowedError") {
-                Toasts.show(Toasts.create(t("System audio capture is blocked, so the other people in the call will not be recorded."), Toasts.Type.FAILURE));
+                showToast(t("System audio capture is blocked, so the other people in the call will not be recorded."), "failure");
             }
         }
 
@@ -410,7 +410,7 @@ export function stopRecording(): Promise<void> {
 
                 if (saved) {
                     if (opts.showSaveToast !== false) {
-                        Toasts.show(Toasts.create(t("Save record"), Toasts.Type.SUCCESS));
+                        showToast(t("Save record"), "success");
                     }
                 } else if (recordedChunks.length > 0) {
                     const blob = new Blob(recordedChunks, { type: mimeType });
@@ -454,7 +454,7 @@ function cleanup() {
 async function saveBlobFallback(blob: Blob, opts: RecordingOptions, filename: string) {
     const notifySuccess = () => {
         if (opts.showSaveToast !== false) {
-            Toasts.show(Toasts.create(t("Save record"), Toasts.Type.SUCCESS));
+            showToast(t("Save record"), "success");
         }
     };
 
