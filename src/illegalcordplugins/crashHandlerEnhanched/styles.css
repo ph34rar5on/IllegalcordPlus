@@ -3,22 +3,57 @@
     z-index: 2147483647;
     inset: 0;
     box-sizing: border-box;
-    width: 100%;
-    height: 100%;
+    width: 600px;
+    height: fit-content;
+    max-width: calc(100% - 48px);
+    max-height: 80dvh;
+    margin: auto;
+    border: 0;
     display: grid;
     place-items: center;
+    overflow: clip;
+    overscroll-behavior: none;
+    padding: 0;
+    background: transparent;
+    color: var(--text-default, var(--text-normal, #f2f3f5));
+    font-family: var(--font-primary, system-ui);
+    color-scheme: dark;
+}
+
+.vc-crash-handler-enhanced-overlay::backdrop {
+    background: color-mix(in oklab, var(--background-base-lowest, #1e1f22) 45%, transparent);
+}
+
+.vc-crash-handler-enhanced-overlay > * {
+    min-height: 0;
+    max-height: 100%;
+}
+
+.vc-crash-handler-enhanced-overlay > div {
+    max-width: 100%;
+}
+
+.vc-crash-handler-enhanced-overlay .vc-btn-base {
+    background-color: var(--control-secondary-background-default, #383a40);
+    border-color: var(--control-secondary-border-default, #41434a);
+    color: var(--control-secondary-text-default, #f2f3f5);
+}
+
+.vc-crash-handler-enhanced-overlay .vc-btn-primary {
+    background-color: var(--control-primary-background-default, #5865f2);
+    border-color: var(--control-primary-border-default, transparent);
+    color: var(--control-primary-text-default, #fff);
+}
+
+.vc-crash-handler-enhanced-overlay .vc-btn-dangerSecondary {
+    color: var(--control-critical-secondary-text-default, #f23f43);
+}
+
+.vc-crash-handler-enhanced-modal-scroller {
+    min-height: 0;
     overflow: auto;
-    scrollbar-width: none;
-    padding: 24px;
-    background: var(--background-primary);
-}
-
-.vc-crash-handler-enhanced-overlay::-webkit-scrollbar {
-    display: none;
-}
-
-.vc-crash-handler-enhanced-scroll-locked {
-    overflow: hidden;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
 }
 
 .vc-crash-handler-enhanced-modal {
@@ -26,12 +61,18 @@
 }
 
 .vc-crash-handler-enhanced-fallback {
-    max-width: 560px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    box-sizing: border-box;
+    width: 600px;
+    max-width: 100%;
+    max-height: min(720px, 80dvh);
     padding: 24px;
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-subtle, #41434a);
     border-radius: var(--radius-sm, 8px);
-    background: var(--background-secondary);
-    color: var(--text-normal);
+    background: var(--background-surface-high, var(--background-secondary, #2b2d31));
+    color: var(--text-default, var(--text-normal, #f2f3f5));
 }
 
 .vc-crash-handler-enhanced-header {
@@ -74,7 +115,7 @@
     padding: 12px 14px;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm, 8px);
-    background: var(--background-secondary);
+    background: var(--background-base-low, var(--background-secondary, #2b2d31));
 }
 
 .vc-crash-handler-enhanced-status-recovered {
@@ -98,7 +139,7 @@
     padding: 14px;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm, 8px);
-    background: var(--background-secondary-alt);
+    background: var(--background-base-lower, var(--background-secondary-alt, #232428));
 }
 
 .vc-crash-handler-enhanced-action-copy,
@@ -141,24 +182,46 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+    flex-wrap: wrap;
 }
 
 .vc-crash-handler-enhanced-settings-header {
-    align-items: stretch;
-    flex-direction: column;
+    padding: 4px 0;
 }
 
 .vc-crash-handler-enhanced-settings-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
     min-width: 0;
-    width: 100%;
 }
 
+.vc-crash-handler-enhanced-settings-section,
 .vc-crash-handler-enhanced-history {
     display: grid;
     gap: 8px;
     padding: 12px;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm, 8px);
+}
+
+.vc-crash-handler-enhanced-settings-section-copy {
+    display: grid;
+    gap: 8px;
+}
+
+.vc-crash-handler-enhanced-history-list {
+    display: grid;
+    gap: 8px;
+    max-height: 280px;
+    min-height: 0;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    scrollbar-width: none;
+}
+
+.vc-crash-handler-enhanced-settings-row > button {
+    flex-shrink: 0;
 }
 
 .vc-crash-handler-enhanced-history-entry {
