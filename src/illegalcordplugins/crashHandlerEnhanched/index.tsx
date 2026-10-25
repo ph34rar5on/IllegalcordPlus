@@ -1411,9 +1411,11 @@ function isIgnorableGlobalError(error: unknown) {
 }
 
 function isIgnorableDiscordRejection(error: unknown) {
+    if (asRecord(error)?.status === 429) return true;
+
     const message = getErrorMessage(error);
 
-    if (message === "Aborted") return true;
+    if (message === "Aborted" || message === "Failed to fetch") return true;
     if (message.startsWith("Request has been terminated\n")) return true;
     if (message === "This gift has been redeemed already.") return true;
 
