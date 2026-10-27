@@ -289,7 +289,7 @@ async function handleVoiceStateUpdates(e: any) {
 
         if (update.channelId === lastChannelId) {
             if (isBlacklistedUserInChannel(lastChannelId)) {
-                showToast(t("Blacklisted user in channel."), "failure");
+                showToast({ text: t("Blacklisted user in channel."), variant: "critical" });
                 await stopRecording();
                 stopUIInterval();
                 break;
@@ -308,7 +308,7 @@ async function handleVoiceChannelSelect(e: any) {
 
     if (newChannelId && lastChannelId !== newChannelId) {
         if (isBlacklistedUserInChannel(newChannelId)) {
-            showToast(t("Blacklisted user in channel."), "failure");
+            showToast({ text: t("Blacklisted user in channel."), variant: "critical" });
         } else {
             await startRecording({
                 mode: settings.store.mode as any,
@@ -340,7 +340,7 @@ export default definePlugin({
         lastChannelId = getConnectedVoiceChannelId();
         if (lastChannelId) {
             if (isBlacklistedUserInChannel(lastChannelId)) {
-                showToast(t("Blacklisted user in channel."), "failure");
+                showToast({ text: t("Blacklisted user in channel."), variant: "critical" });
             } else {
                 startRecording({
                     mode: settings.store.mode as any,

@@ -213,7 +213,7 @@ export function _blacklistBadModules(requireCache: NonNullable<AnyWebpackRequire
 }
 
 let devToolsOpen = false;
-if (IS_DEV && IS_DISCORD_DESKTOP) {
+if (IS_DEV && IS_DISCORD_DESKTOP && typeof window !== "undefined") {
     // At this point in time, DiscordNative has not been exposed yet, so setImmediate is needed
     setTimeout(() => {
         DiscordNative/* just to make sure */?.window.setDevtoolsCallbacks(() => devToolsOpen = true, () => devToolsOpen = false);

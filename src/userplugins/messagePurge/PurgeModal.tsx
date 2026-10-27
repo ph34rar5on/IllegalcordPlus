@@ -115,22 +115,22 @@ function PurgeModalInner({ modalProps }: { modalProps: RenderModalProps; }) {
 
     function buildOptions(dryRun: boolean): PurgeOptions | null {
         if (!form.guildId) {
-            showToast("Server ID (or @me for DMs) is required.", "failure");
+            showToast({ text: "Server ID (or @me for DMs) is required.", variant: "critical" });
             return null;
         }
         if (form.guildId === "@me" && !form.channelId) {
-            showToast("Channel ID is required for DMs.", "failure");
+            showToast({ text: "Channel ID is required for DMs.", variant: "critical" });
             return null;
         }
         if (form.guildId !== "@me" && !form.channelId && !form.authorId && !form.content) {
-            showToast("Provide a Channel ID, Author ID, or content filter to scope a server-wide purge.", "failure");
+            showToast({ text: "Provide a Channel ID, Author ID, or content filter to scope a server-wide purge.", variant: "critical" });
             return null;
         }
         if (form.pattern) {
             try {
                 new RegExp(form.pattern, "i");
             } catch {
-                showToast("Invalid regex pattern.", "failure");
+                showToast({ text: "Invalid regex pattern.", variant: "critical" });
                 return null;
             }
         }
