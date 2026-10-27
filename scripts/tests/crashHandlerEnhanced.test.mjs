@@ -210,7 +210,7 @@ test("Includes the settings diagnostics and history in the popup without Discord
     assert.equal(store.lastCrashReport, "");
 });
 
-test("Ignores failed fetches and rate limit rejections without hiding other errors or window failures", () => {
+test("Ignores known Discord rejections without hiding other errors or window failures", () => {
     const calls = [];
     const constants = source.slice(source.indexOf("const MESSAGE_SEND_FORBIDDEN_RE"), source.indexOf("const Native ="));
     const messages = source.slice(source.indexOf("function getErrorText("), source.indexOf("function getErrorStack("));
@@ -232,6 +232,9 @@ test("Ignores failed fetches and rate limit rejections without hiding other erro
         new TypeError("Failed to fetch"),
         "Failed to fetch",
         { message: "Failed to fetch", stack: "TypeError: Failed to fetch" },
+        new Error("Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION"),
+        "Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION",
+        { message: "Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION", stack: "Error: Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION" },
         rateLimited,
         Object.assign(new Error("You are being rate limited."), { status: 429 }),
         { status: 429, body: { message: "Riprova più tardi.", retry_after: 10 } },
@@ -245,14 +248,58 @@ test("Ignores failed fetches and rate limit rejections without hiding other erro
     handleUnhandledRejection({ reason: new Error("Failed to fetch user profile") });
     handleUnhandledRejection({ reason: Object.assign(new Error("Server error"), { status: 500 }) });
     handleUnhandledRejection({ reason: new Error("You are being rate limited.") });
+    handleUnhandledRejection({ reason: new Error("Cannot set setting key: OTHER_SETTING") });
     handleGlobalError({ error: new TypeError("Failed to fetch") });
     handleGlobalError({ error: rateLimited });
+    handleGlobalError({ error: new Error("Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION") });
     assert.deepEqual(calls, [
         ["unhandled-rejection", "Cannot read properties of undefined"], "save", "log", "popup",
         ["unhandled-rejection", "Failed to fetch user profile"], "save", "log", "popup",
         ["unhandled-rejection", "Server error"], "save", "log", "popup",
         ["unhandled-rejection", "You are being rate limited."], "save", "log", "popup",
+        ["unhandled-rejection", "Cannot set setting key: OTHER_SETTING"], "save", "log", "popup",
         ["window-error", "Failed to fetch"], "save", "log", "popup",
-        ["window-error", "Ton nombre d'actions est limité."], "save", "log", "popup"
+        ["window-error", "Ton nombre d'actions est limité."], "save", "log", "popup",
+        ["window-error", "Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION"], "save", "log", "popup"
     ]);
+});
+
+test("Preserves browser error locations in saved reports and disk logs", () => {
+    const reports = [];
+    const logs = [];
+    const handlers = source.slice(source.indexOf("function normalizeGlobalError("), source.indexOf("function installGlobalListeners("));
+    const formatter = source.slice(source.indexOf("function formatReport("), source.indexOf("function saveReport("));
+    const logBuilder = source.slice(source.indexOf("function buildCrashLogContents("), source.indexOf("function writeCrashLog("));
+    const { handleGlobalError, buildCrashLogContents } = load(handlers + formatter + logBuilder + "\nreturn { handleGlobalError, buildCrashLogContents };", {
+        latestReport: null,
+        settings: { store: { captureGlobalErrors: true } },
+        getErrorMessage: error => error.message,
+        createReport: ({ error }, kind) => ({
+            kind, message: error.message, stack: error.stack, timestamp: 0,
+            possiblePlugins: [], recurringPlugins: [], patchedModules: [], diagnosticEvents: [], breadcrumbs: [], enabledPlugins: []
+        }),
+        saveReport: report => reports.push(report),
+        writeCrashLog: report => logs.push(report),
+        VERSION: "test",
+        navigator: { userAgent: "test" },
+        CRASH_KIND_LABELS: { "window-error": "Window error" }
+    });
+    const error = new TypeError("Cannot read properties of undefined (reading 'cloneNode')");
+    for (const event of [
+        { error, filename: "file:///VencordRenderer", lineno: 42, colno: 1940 },
+        { error: null, message: error.message, filename: "", lineno: 1, colno: 1940 }
+    ]) {
+        handleGlobalError(event);
+        const report = reports.at(-1);
+        assert.deepEqual(report.sourceLocation, { filename: event.filename, line: event.lineno, column: event.colno });
+        assert.equal(logs.at(-1), report);
+        const log = JSON.parse(buildCrashLogContents(report));
+        assert.deepEqual(log.sourceLocation, report.sourceLocation);
+        assert.ok(log.reportText.includes(`Source: ${event.filename || "<anonymous>"}:${event.lineno}:${event.colno}`));
+    }
+    assert.equal(reports[0].stack, error.stack);
+    handleGlobalError({ error, filename: "", lineno: 0, colno: 0 });
+    const log = JSON.parse(buildCrashLogContents(reports.at(-1)));
+    assert.equal(log.sourceLocation, undefined);
+    assert.ok(!log.reportText.includes("Source:"));
 });
