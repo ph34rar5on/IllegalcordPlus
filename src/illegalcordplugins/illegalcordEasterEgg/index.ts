@@ -5,8 +5,17 @@
  */
 
 import { definePluginSettings } from "@api/Settings";
+import ErrorBoundary from "@components/ErrorBoundary";
 import { EquicordDevs } from "@utils/constants";
-import definePlugin, { OptionType } from "@utils/types";
+import { makeLazy } from "@utils/lazy";
+import { classes, isAnyPluginDev } from "@utils/misc";
+import definePlugin, { OptionType, Plugin, PluginAuthor } from "@utils/types";
+import { React } from "@webpack/common";
+import type { ElementType, HTMLAttributes } from "react";
+
+import Plugins from "~plugins";
+
+import style from "./style.css?managed";
 
 const presetQuotes = [
     "Discord is spying on us",
@@ -22,6 +31,11 @@ const presetQuotes = [
 ];
 
 const settings = definePluginSettings({
+    developerVoiceSpectrum: {
+        type: OptionType.BOOLEAN,
+        description: "Cycle client developers' names through the color spectrum in voice channels.",
+        default: true
+    },
     additionalQuotes: {
         type: OptionType.STRING,
         description: "Add more random quotes, one per line.",
@@ -30,13 +44,30 @@ const settings = definePluginSettings({
     }
 });
 
+const VOICE_NAME_SETTINGS = ["developerVoiceSpectrum"] satisfies Array<keyof typeof settings.def>;
+const getPluginAuthorIds = makeLazy(() => new Set(Object.values(Plugins).flatMap((plugin: Plugin) => plugin.authors.map((author: PluginAuthor) => author.id.toString()))));
+
+interface DeveloperVoiceNameProps extends HTMLAttributes<HTMLElement> {
+    component: ElementType;
+    userId: string;
+}
+
+const DeveloperVoiceName = ErrorBoundary.wrap(({ component, userId, className, ...props }: DeveloperVoiceNameProps) => {
+    const { developerVoiceSpectrum } = settings.use(VOICE_NAME_SETTINGS);
+    return React.createElement(component, {
+        ...props,
+        className: classes(className, developerVoiceSpectrum && (isAnyPluginDev(userId) || getPluginAuthorIds().has(userId)) && "vc-illegalcord-easter-egg-spectrum")
+    });
+}, { noop: true });
+
 export default definePlugin({
     name: "IllegalcordEasterEgg",
-    description: "Shows random Illegalcord jokes under Did you know while loading.",
+    description: "Shows random Illegalcord loading jokes and gives developers colorful names in voice channels.",
     authors: [EquicordDevs.irritably],
     tags: ["Fun"],
     enabledByDefault: true,
     settings,
+    managedStyle: style,
 
     patches: [{
         find: "#{intl::LOADING_DID_YOU_KNOW}",
@@ -51,7 +82,15 @@ export default definePlugin({
                 noWarn: true
             }
         ]
+    }, {
+        find: "#{intl::GUEST_NAME_SUFFIX})]",
+        replacement: {
+            match: /(?<=\(0,\i\.jsxs\)\()(\i(?:\.\i)?|"span"|"div"),\{(?=.{0,150}?children:\[.{0,200}?#{intl::GUEST_NAME_SUFFIX})/,
+            replace: "$self.DeveloperVoiceName,{component:$1,userId:arguments[0].user.id,"
+        }
     }],
+
+    DeveloperVoiceName,
 
     getQuote() {
         const additionalQuotes = settings.store.additionalQuotes.split("\n").map((quote: string) => quote.trim()).filter(Boolean);
