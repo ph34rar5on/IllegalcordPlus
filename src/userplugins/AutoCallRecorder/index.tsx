@@ -7,11 +7,12 @@
 import "./style.css";
 
 import { definePluginSettings } from "@api/Settings";
+import { Button } from "@components/Button";
 import { t } from "@testcordplugins/autoTranslateNightcord";
 import definePlugin, { OptionType, PluginSettingComponentProps } from "@utils/types";
 import { findByPropsLazy, findStoreLazy } from "@webpack";
 import { Avatar, FluxDispatcher, IconUtils, React, RelationshipStore, SelectedChannelStore, showToast,UserStore } from "@webpack/common";
-import { Button, SearchableSelect, TextInput } from "@webpack/common/components";
+import { SearchableSelect, TextInput } from "@webpack/common/components";
 
 import { getRecordingDurationMs,isCurrentlyRecording, startRecording, stopRecording } from "./recorder";
 
@@ -74,7 +75,7 @@ const SavePathSelector = (props: PluginSettingComponentProps) => {
                 />
             </div>
             <Button
-                size={Button.Sizes.SMALL}
+                size="small"
                 onClick={async () => {
                     try {
                         const native = (window as any).VencordNative?.pluginHelpers?.AutoCallRecorder;
