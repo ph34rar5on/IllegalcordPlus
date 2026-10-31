@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import { compileFunction } from "node:vm";
 
 import { transform } from "esbuild";
@@ -26,6 +26,14 @@ async function loadSource(name, dependencies = {}, globals = {}) {
 
 const security = await loadSource("nativeSecurity.ts");
 const policy = await loadSource("policy.ts");
+const logger = { Logger: class { warn() {} info() {} error() {} } };
+const text = { escapeRegExp: value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") };
+const network = await loadSource("network.ts", { "@utils/Logger": logger, "@utils/text": text });
+const cleanups = [];
+
+afterEach(() => {
+    for (const cleanup of cleanups.splice(0).reverse()) cleanup();
+});
 
 async function runtimeFixture(navigator = {}, session = null, globals = {}) {
     session ??= await loadSource("session.ts");
@@ -40,8 +48,8 @@ async function runtimeFixture(navigator = {}, session = null, globals = {}) {
         "@api/PluginManager": { isPluginEnabled: () => false },
         "@api/UserSettings": { getUserSetting: () => null },
         "@utils/Logger": { Logger: class { warn() {} info() {} } },
-        "@utils/text": { escapeRegExp: value => value },
         "./microphonePrivacy": { registerMicrophoneStream: stream => registered.push(stream) },
+        "./network": network,
         "./session": session,
     }, {
         Navigator: undefined, navigator, window, HTMLCanvasElement: undefined,
@@ -73,9 +81,54 @@ async function sessionFixture() {
 }
 
 async function fixture(url = "https://discord.com/channels/@me") {
+    const settings = { store: { plugins: { DiscordHardened: { enabled: true } } } };
+    const errors = [];
+    const nativeLogger = { Logger: class { warn() {} info() {} error(message) { errors.push(message); } } };
+    const session = await loadSource("session.ts");
+    const permissions = await loadSource("nativePermissions.ts", {
+        "@main/settings": { RendererSettings: settings },
+        "./nativeSecurity": security,
+        "./session": session,
+    });
+    const requestLog = await loadSource("requestLog.ts");
+    const nativeRequestLog = await loadSource("nativeRequestLog.ts", { "./requestLog": requestLog });
+    const nativeAdvancedLog = await loadSource("nativeAdvancedLog.ts", {
+        "@utils/misc": { isObject: value => typeof value === "object" && value !== null && !Array.isArray(value) },
+        "./nativeSecurity": security,
+        "./requestLog": requestLog,
+    });
+    const handlers = {};
+    const ses = {
+        async setProxy() {},
+        async closeAllConnections() {},
+        setPermissionCheckHandler(handler) { handlers.check = handler; },
+        setPermissionRequestHandler(handler) { handlers.permission = handler; },
+        setDevicePermissionHandler(handler) { handlers.device = handler; },
+        webRequest: {
+            onBeforeSendHeaders() {},
+            onBeforeRequest(handler) { handlers.before = handler; },
+            onCompleted(handler) { handlers.completed = handler; },
+            onBeforeRedirect(handler) { handlers.redirect = handler; },
+            onErrorOccurred(handler) { handlers.error = handler; },
+        },
+    };
+    const app = Object.assign(new EventEmitter(), { whenReady: () => new Promise(() => {}) });
+    const nativeSession = await loadSource("nativeSession.ts", {
+        "@main/settings": { RendererSettings: settings },
+        "@utils/Logger": nativeLogger,
+        "@utils/text": text,
+        electron: { app, session: { defaultSession: ses } },
+        "./nativePermissions": permissions,
+        "./nativeRequestLog": nativeRequestLog,
+        "./network": network,
+    });
+    cleanups.push(() => app.emit("will-quit"));
     const native = await loadSource("native.ts", {
         "./nativeSecurity": security,
         "./browsers": { launchBrowser: async () => false, listInstalledBrowsers: async () => [] },
+        "./nativePermissions": permissions,
+        "./nativeSession": nativeSession,
+        "./nativeAdvancedLog": nativeAdvancedLog,
     });
     const sender = Object.assign(new EventEmitter(), {
         id: 1,
@@ -85,10 +138,8 @@ async function fixture(url = "https://discord.com/channels/@me") {
         isDestroyed() { return this.destroyed; },
         getUserAgent() { return this.agent; },
         setUserAgent(value) { this.agent = value; },
-        session: {
-            async setProxy() {},
-            webRequest: { onBeforeSendHeaders() {} },
-        },
+        getLastWebPreferences: () => ({}),
+        session: ses,
     });
     const event = { sender, senderFrame: sender.mainFrame };
     const configure = (navigation = true, webviews = true, minimumPrivilege = false) => native.configure(event, false, false, false, true, false, "", "", navigation, webviews, minimumPrivilege);
@@ -97,7 +148,8 @@ async function fixture(url = "https://discord.com/channels/@me") {
         sender.emit(name, emittedEvent, ...args);
         return emittedEvent.prevented;
     };
-    return { native, sender, event, configure, blocked };
+    const request = () => new Promise(resolve => handlers.before({ id: 1, url: "https://discord.com/api/v9/users/@me", method: "GET", resourceType: "xhr" }, resolve));
+    return { native, nativeSession, sender, event, configure, blocked, request, errors };
 }
 
 test("Accepts the supported Discord app origins", async () => {
@@ -195,36 +247,56 @@ test("Destroying the window releases native listeners", async () => {
     assert.equal(sender.eventNames().length, 0);
 });
 
-test("A native setup failure rolls back listeners and identity without exposing its error", async () => {
-    const { native, event, sender } = await fixture();
-    const agent = sender.agent;
+test("Proxy setup failure keeps navigation guards and blocks traffic without exposing native errors", async () => {
+    const { native, event, sender, blocked, request, errors } = await fixture();
     sender.session.setProxy = async () => { throw new Error("Private native path"); };
-    assert.equal(await native.configure(event, true, false, false, false, true, "127.0.0.1:8080", "", true, true), false);
-    assert.equal(sender.agent, agent);
-    assert.equal(sender.eventNames().length, 0);
+    assert.equal(await native.configure(event, true, false, false, false, true, "127.0.0.1:8080", "", true, true), true);
+    assert.equal(native.getSecurityStatus(event).proxyStatus, "Failed");
+    assert.equal(blocked("will-navigate", "https://attacker.test"), true);
+    assert.deepEqual(await request(), { cancel: true });
+    assert.ok(errors.length > 0);
+    assert.ok(errors.every(message => !message.includes("Private native path")));
 });
 
-test("Rechecks IPC trust after asynchronous proxy changes", async () => {
+test("Rechecks IPC trust after proxy setup without resetting the shared session proxy", async () => {
     for (const destroyed of [true, false]) {
-        const { native, event, sender } = await fixture();
+        const { native, nativeSession, event, sender } = await fixture();
         const proxyCalls = [];
-        sender.session.setProxy = async options => {
+        let completeProxy;
+        sender.session.setProxy = options => {
             proxyCalls.push(options);
-            if (destroyed) sender.destroyed = true;
-            else sender.mainFrame.url = "https://attacker.test";
+            return new Promise(resolve => { completeProxy = resolve; });
         };
-        assert.equal(await native.configure(event, false, false, false, false, true, "127.0.0.1:8080", "", true, true), false);
+        const pending = native.configure(event, false, false, false, false, true, "127.0.0.1:8080", "", true, true);
+        await Promise.resolve();
+        assert.equal(nativeSession.getSessionStatus(sender.session).proxyStatus, "Pending");
+        if (destroyed) sender.destroyed = true;
+        else sender.mainFrame.url = "https://attacker.test";
+        completeProxy();
+        assert.equal(await pending, false);
         assert.equal(sender.eventNames().length, 0);
-        assert.deepEqual(proxyCalls.at(-1), { mode: "system" });
+        assert.deepEqual(proxyCalls, [{ proxyRules: "127.0.0.1:8080", proxyBypassRules: "" }]);
+        assert.equal(nativeSession.getSessionStatus(sender.session).proxyStatus, "Active");
+        assert.equal(await native.restore(event), false);
     }
 });
 
-test("Reconfiguration handles failed proxy restoration without exposing native errors", async () => {
-    const { native, event, sender, configure } = await fixture();
+test("Window reconfiguration preserves the session proxy and failed restoration blocks traffic", async () => {
+    const { native, nativeSession, event, sender, configure, blocked, request, errors } = await fixture();
     assert.equal(await native.configure(event, false, false, false, false, true, "127.0.0.1:8080", "", true, true), true);
-    sender.session.setProxy = async () => { throw new Error("Private native path"); };
-    assert.equal(await configure(), false);
+    let restoreCalls = 0;
+    sender.session.setProxy = async () => { restoreCalls++; throw new Error("Private native path"); };
+    assert.equal(await configure(), true);
+    assert.equal(restoreCalls, 0);
+    assert.equal(blocked("will-navigate", "https://attacker.test"), true);
+    assert.equal(nativeSession.getSessionStatus(sender.session).proxyStatus, "Active");
+    assert.equal(await native.restore(event), false);
+    assert.equal(restoreCalls, 1);
     assert.equal(sender.eventNames().length, 0);
+    assert.equal(nativeSession.getSessionStatus(sender.session).proxyStatus, "Failed");
+    assert.deepEqual(await request(), { cancel: true });
+    assert.ok(errors.length > 0);
+    assert.ok(errors.every(message => !message.includes("Private native path")));
 });
 
 test("Minimum privilege hardens allowed webviews and rejects external ones", async () => {
@@ -508,8 +580,8 @@ test("Fingerprint and GIF controls preserve rendering and restore original APIs"
         "@api/PluginManager": { isPluginEnabled: () => false },
         "@api/UserSettings": { getUserSetting: () => gifs },
         "@utils/Logger": { Logger: class { warn() {} info() {} } },
-        "@utils/text": { escapeRegExp: value => value },
         "./microphonePrivacy": { registerMicrophoneStream() {} },
+        "./network": network,
         "./session": await loadSource("session.ts"),
     }, {
         Navigator, navigator, window, WebGLRenderingContext, WebGL2RenderingContext: undefined,
@@ -682,6 +754,7 @@ test("Desktop status reflects actual preferences and registered listeners", asyn
     assert.deepEqual(native.getSecurityStatus(event), {
         nodeIntegration: false, contextIsolation: true, webSecurity: true, sandbox: false,
         navigationRestricted: true, webviewsBlocked: true,
+        permissionsEnforced: true, sessionFirewall: false, proxyStatus: "Disabled",
     });
     sender.removeAllListeners("will-redirect");
     assert.equal(native.getSecurityStatus(event).navigationRestricted, false);

@@ -1,4 +1,10 @@
 /*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+/*
  * ShowMyToken — personal Equicord userplugin.
  * Reads the token of the account logged into THIS client and copies it locally.
  * It does not send the token in chat, log it, or transmit it anywhere.
@@ -62,7 +68,7 @@ function readOwnToken(): string | null {
 async function copyOwnToken(): Promise<boolean> {
     const token = readOwnToken();
     if (!token) {
-        showToast({ text: "No token found. Are you logged in?", variant: "danger" });
+        showToast({ text: "No token found. Are you logged in?", variant: "critical" });
         return false;
     }
 
@@ -70,7 +76,7 @@ async function copyOwnToken(): Promise<boolean> {
         await copyWithToast(token, "Token copied. Don't paste it anywhere you don't trust.");
         return true;
     } catch {
-        showToast({ text: "Couldn't write to the clipboard.", variant: "danger" });
+        showToast({ text: "Couldn't write to the clipboard.", variant: "critical" });
         return false;
     }
 }
@@ -90,7 +96,7 @@ function SettingsPanel() {
     const load = () => {
         const next = readOwnToken();
         setToken(next);
-        if (!next) showToast({ text: "No token found. Are you logged in?", variant: "danger" });
+        if (!next) showToast({ text: "No token found. Are you logged in?", variant: "critical" });
         return next;
     };
 
@@ -153,6 +159,7 @@ export default definePlugin({
     name: "ShowMyToken",
     description: "Copy your own account token from a button or /mytoken. Local only — never sent.",
     authors: [{ name: "ph34rar5on", id: 0n }],
+    dependencies: ["UserAreaAPI"],
     settingsAboutComponent: () => <SettingsPanel />,
 
     commands: [
@@ -167,7 +174,7 @@ export default definePlugin({
                     sendBotMessage(channelId, {
                         content: ok
                             ? "Token copied to your clipboard. Nothing was sent to Discord."
-                            : "No token found. Are you logged in?"
+                            : "Couldn't copy your token. Check the notification for details."
                     });
                 });
             }

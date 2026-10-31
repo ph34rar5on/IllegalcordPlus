@@ -78,6 +78,10 @@ const RECORDING = {
 
 async function fixture({ privacy: privacyOverrides = {}, mode = "PUSH_TO_TALK", selfMute = false, inCall = true } = {}) {
     const session = await loadSource("illegalcordplugins/DiscordHardened/session.ts");
+    const network = await loadSource("illegalcordplugins/DiscordHardened/network.ts", {
+        "@utils/Logger": { Logger: class { warn() {} } },
+        "@utils/text": { escapeRegExp: value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") },
+    });
     const captured = { microphones: [], desktop: [] };
     const toasts = [];
 
@@ -130,8 +134,8 @@ async function fixture({ privacy: privacyOverrides = {}, mode = "PUSH_TO_TALK", 
         "@api/PluginManager": { isPluginEnabled: () => false },
         "@api/UserSettings": { getUserSetting: () => null },
         "@utils/Logger": { Logger: class { warn() {} info() {} } },
-        "@utils/text": { escapeRegExp: value => value },
         "./microphonePrivacy": privacy,
+        "./network": network,
         "./session": session,
     }, {
         navigator, window, Navigator: undefined, HTMLCanvasElement: undefined, Notification: undefined, Element: undefined,
@@ -143,11 +147,7 @@ async function fixture({ privacy: privacyOverrides = {}, mode = "PUSH_TO_TALK", 
     const recorder = await loadSource("userplugins/AutoCallRecorder/recorder.ts", {
         "@testcordplugins/autoTranslateNightcord": { t: key => key },
         "@webpack/common": {
-            Toasts: {
-                show: toast => toasts.push(toast),
-                create: (message, type) => ({ message, type }),
-                Type: { SUCCESS: "success", FAILURE: "failure", MESSAGE: "message" },
-            },
+            showToast: toast => toasts.push(toast),
         },
         "./mediaFixer": { fixMp4Duration: value => value, fixWebmBufferDuration: async value => value },
     }, {
@@ -204,8 +204,8 @@ test("Blocked system audio capture warns instead of failing silently", async t =
     assert.equal(await recorder.startRecording(RECORDING), true);
     assert.deepEqual(captured.desktop, []);
     assert.equal(toasts.length, 1);
-    assert.equal(toasts[0].type, "failure");
-    assert.match(toasts[0].message, /System audio capture is blocked/);
+    assert.equal(toasts[0].variant, "critical");
+    assert.match(toasts[0].text, /System audio capture is blocked/);
 });
 
 test("Blocked microphone access warns instead of failing silently", async t => {
@@ -219,8 +219,8 @@ test("Blocked microphone access warns instead of failing silently", async t => {
     assert.deepEqual(captured.microphones, []);
     // Denying the microphone also denies the desktop loopback, which is requested with audio
     assert.deepEqual(captured.desktop, []);
-    assert.ok(toasts.every(toast => toast.type === "failure"));
-    assert.match(toasts[0].message, /Microphone access is blocked/);
-    assert.match(toasts[1].message, /System audio capture is blocked/);
+    assert.ok(toasts.every(toast => toast.variant === "critical"));
+    assert.match(toasts[0].text, /Microphone access is blocked/);
+    assert.match(toasts[1].text, /System audio capture is blocked/);
     assert.equal(toasts.length, 2);
 });
