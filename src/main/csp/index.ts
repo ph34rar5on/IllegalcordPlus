@@ -55,11 +55,10 @@ export const CspPolicies: PolicyMap = {
     // CDNs used for some things by Vencord.
     // FIXME: we really should not be using CDNs anymore
     "cdnjs.cloudflare.com": ImageScriptsAndCssSrc,
-    "cdn.jsdelivr.net": ImageScriptsAndCssSrc,
+    "cdn.jsdelivr.net": [...ImageScriptsAndCssSrc, "media-src"],
 
     // Function Specific
     "api.github.com": ConnectSrc, // used for updating Vencord itself
-    "rdap.org": ConnectSrc,
     "free.freeipapi.com": ConnectSrc,
     "ws.audioscrobbler.com": ConnectSrc, // Last.fm API
     "musicbrainz.org": ConnectSrc,
@@ -217,6 +216,10 @@ export function initCsp() {
 
     session.defaultSession.webRequest.onHeadersReceived(({ responseHeaders, resourceType, url }, cb) => {
         if (responseHeaders) {
+            if (url === DESKTOP_MONACO_EDITOR_URL) {
+                const header = findHeader(responseHeaders, "content-type") ?? "content-type";
+                responseHeaders[header] = ["text/html"];
+            }
             if (resourceType === "mainFrame")
                 patchCsp(responseHeaders);
 

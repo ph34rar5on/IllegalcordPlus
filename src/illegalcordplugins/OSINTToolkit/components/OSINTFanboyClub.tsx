@@ -8,7 +8,7 @@ import "./styles.css";
 
 import * as DataStore from "@api/DataStore";
 import { Button } from "@components/Button";
-import { HeadingPrimary, HeadingTertiary } from "@components/Heading";
+import { Heading } from "@components/Heading";
 import { SettingsTab, wrapTab } from "@components/settings";
 import { classNameFactory } from "@utils/css";
 import { copyWithToast, openUserProfile } from "@utils/discord";
@@ -19,7 +19,6 @@ import {
     geolocateImage,
     getRecentInvestigations,
     getUsernameSearchUrls,
-    lookupBreachVip,
     lookupCordCat,
     lookupDomain,
     lookupIP,
@@ -35,7 +34,7 @@ import {
 
 type SectionId = "cordcat" | "network" | "identity" | "geo" | "resources" | "api";
 type ResultStatus = "success" | "error";
-type ResultKind = "breach" | "cordcat" | "domain" | "geo" | "guild" | "invite" | "ip" | "status" | "username";
+type ResultKind = "cordcat" | "domain" | "geo" | "guild" | "invite" | "ip" | "status" | "username";
 
 interface ResultEntry {
     id: string;
@@ -74,19 +73,19 @@ const SETTING_KEYS = ["cordCatApiKey", "geoSeeerApiKey", "enableLogging", "clear
 const cl = classNameFactory("vc-osint-club-");
 
 const sections: Array<{ id: SectionId; label: string; description: string; }> = [
-    { id: "cordcat", label: "CordCat", description: "Discord intelligence" },
-    { id: "network", label: "Network", description: "Domains and IPs" },
-    { id: "identity", label: "Identity", description: "Users and breaches" },
-    { id: "geo", label: "Geo Lab", description: "Images and locations" },
-    { id: "resources", label: "Resources", description: "OSINT launchpad" },
-    { id: "api", label: "API Vault", description: "Keys and diagnostics" }
+    { id: "cordcat", label: "CordCat", description: "Discord intelligence." },
+    { id: "network", label: "Network", description: "Domains and IPs." },
+    { id: "identity", label: "Identity", description: "Usernames and profiles." },
+    { id: "geo", label: "Images", description: "Images and locations." },
+    { id: "resources", label: "Resources", description: "OSINT resources." },
+    { id: "api", label: "Settings", description: "Keys and diagnostics." }
 ];
 
 function ToolCard({ title, description, children }: ToolCardProps) {
     return (
         <section className={cl("card")}>
             <div className={cl("card-head")}>
-                <HeadingTertiary>{title}</HeadingTertiary>
+                <Heading tag="h4">{title}</Heading>
                 <span>{description}</span>
             </div>
             <div className={cl("card-body")}>{children}</div>
@@ -119,6 +118,7 @@ function ResourceGroup({ title, items }: ResourceGroupProps) {
                         <Button
                             variant="secondary"
                             size="small"
+                            aria-label={`Open ${item.name}`}
                             onClick={() => openExternal(item.url)}
                         >
                             Open
@@ -139,8 +139,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isResultKind(value: unknown): value is ResultKind {
-    return value === "breach"
-        || value === "cordcat"
+    return value === "cordcat"
         || value === "domain"
         || value === "geo"
         || value === "guild"
@@ -238,7 +237,7 @@ function ResultSection({ title, subtitle, children }: ResultSectionProps) {
     return (
         <section className={cl("visual-section")}>
             <div className={cl("visual-section-head")}>
-                <HeadingTertiary>{title}</HeadingTertiary>
+                <Heading tag="h4">{title}</Heading>
                 {subtitle ? <span>{subtitle}</span> : null}
             </div>
             <div className={cl("visual-section-body")}>{children}</div>
@@ -344,7 +343,7 @@ function ProfileResult({ data }: ProfileResultProps) {
                 )}
                 <div className={cl("profile-title")}>
                     <span>Discord identity</span>
-                    <HeadingPrimary>{displayName}</HeadingPrimary>
+                    <Heading tag="h2">{displayName}</Heading>
                     <p>@{username}{userId ? ` · ${userId}` : ""}</p>
                 </div>
                 {userId ? (
@@ -506,7 +505,7 @@ function ResultVisual({ entry }: ResultVisualProps) {
         return (
             <div className={cl("error-state")}>
                 <span>Lookup failed</span>
-                <HeadingTertiary>{error ?? "The service did not return a usable result."}</HeadingTertiary>
+                <Heading tag="h4">{error ?? "The service did not return a usable result."}</Heading>
                 <p>Check the input and API key, then retry. CordCat profile lookups automatically fall back to the full query endpoint when its lightweight endpoint rejects a valid ID.</p>
             </div>
         );
@@ -523,15 +522,6 @@ function ResultVisual({ entry }: ResultVisualProps) {
             return <StatusResult data={entry.data} />;
         case "geo":
             return <GeoResult data={entry.data} />;
-        case "breach": {
-            const root = isRecord(entry.data) ? entry.data : undefined;
-            return (
-                <div className={cl("visual-stack")}>
-                    <div className={cl("metrics")}><Metric label="Matching records" value={getNumber(root, "total") ?? 0} tone="warning" /></div>
-                    <ResultSection title="Breach records"><DataExplorer value={getArray(root, "results")} /></ResultSection>
-                </div>
-            );
-        }
         case "username": {
             const root = isRecord(entry.data) ? entry.data : undefined;
             return (
@@ -546,7 +536,7 @@ function ResultVisual({ entry }: ResultVisualProps) {
             );
         }
         default:
-            return <DataExplorer value={entry.data} />;
+            return <div className={cl("visual-stack")}><DataExplorer value={entry.data} /></div>;
     }
 }
 
@@ -563,11 +553,6 @@ function OSINTFanboyClub() {
     const [domain, setDomain] = useState("");
     const [ip, setIp] = useState("");
     const [username, setUsername] = useState("");
-    const [breachTerm, setBreachTerm] = useState("");
-    const [breachFields, setBreachFields] = useState("email,username,discordid");
-    const [minecraftOnly, setMinecraftOnly] = useState(false);
-    const [wildcard, setWildcard] = useState(false);
-    const [caseSensitive, setCaseSensitive] = useState(false);
     const [profileId, setProfileId] = useState("");
     const [imageUrl, setImageUrl] = useState("");
 
@@ -634,8 +619,7 @@ function OSINTFanboyClub() {
             <div className={cl("root")}>
                 <header className={cl("hero")}>
                     <div>
-                        <span className={cl("eyebrow")}>OSINT TOOLKIT WORKSPACE</span>
-                        <HeadingPrimary>Osint Fanboy club</HeadingPrimary>
+                        <Heading tag="h2">Osint Fanboy club</Heading>
                         <p>A unified investigation desk for Discord intelligence, public infrastructure and image analysis.</p>
                     </div>
                     <div className={cl("health")}>
@@ -655,15 +639,16 @@ function OSINTFanboyClub() {
                             className={cl("nav-button", { "nav-button-active": section === item.id })}
                             variant="none"
                             size="small"
+                            title={item.description}
+                            aria-pressed={section === item.id}
                             onClick={() => setSection(item.id)}
                         >
                             <span>{item.label}</span>
-                            <small>{item.description}</small>
                         </Button>
                     ))}
                 </nav>
 
-                <div className={cl("workspace")}>
+                <div className={cl("workspace", { "workspace-full": section === "resources" || section === "api" })}>
                     <main className={cl("tools")}>
                         {section === "cordcat" ? (
                             <>
@@ -742,30 +727,6 @@ function OSINTFanboyClub() {
                                     </div>
                                 </ToolCard>
 
-                                <ToolCard title="Breach.vip explorer" description="Search selected public record fields with the same controls as /breachvip.">
-                                    <div className={cl("split")}>
-                                        <TextInput value={breachTerm} placeholder="Search term" onChange={setBreachTerm} />
-                                        <TextInput value={breachFields} placeholder="email,username,discordid" onChange={setBreachFields} />
-                                    </div>
-                                    <div className={cl("toggles")}>
-                                        <Toggle label="Minecraft records only." value={minecraftOnly} onChange={setMinecraftOnly} />
-                                        <Toggle label="Enable * and ? wildcards." value={wildcard} onChange={setWildcard} />
-                                        <Toggle label="Case-sensitive search." value={caseSensitive} onChange={setCaseSensitive} />
-                                    </div>
-                                    <Button
-                                        disabled={Boolean(busy)}
-                                        onClick={() => void run("breach", "Breach.vip search", () => lookupBreachVip(
-                                            breachTerm.trim(),
-                                            [...new Set(breachFields.toLowerCase().split(",").map(field => field.trim()).filter(Boolean))],
-                                            minecraftOnly,
-                                            wildcard,
-                                            caseSensitive
-                                        ))}
-                                    >
-                                        Search records
-                                    </Button>
-                                </ToolCard>
-
                                 <ToolCard title="Discord profile utilities" description="Copy or open a canonical Discord user URL.">
                                     <TextInput value={profileId} placeholder="Discord user ID" onChange={setProfileId} />
                                     <div className={cl("actions")}>
@@ -840,11 +801,11 @@ function OSINTFanboyClub() {
                         ) : null}
                     </main>
 
-                    <aside className={cl("results")} aria-live="polite">
+                    <aside className={cl("results")} aria-live="polite" hidden={section === "resources" || section === "api"}>
                         <div className={cl("results-head")}>
                             <div>
-                                <span className={cl("eyebrow")}>INVESTIGATION BOARD</span>
-                                <HeadingTertiary>{busy ?? result?.title ?? "Ready for a lookup"}</HeadingTertiary>
+                                <span className={cl("eyebrow")}>Results</span>
+                                <Heading tag="h4">{busy ?? result?.title ?? "Ready for a lookup"}</Heading>
                             </div>
                             {result ? (
                                 <div className={cl("result-actions")}>
@@ -903,7 +864,7 @@ function OSINTFanboyClub() {
                                 </>
                             ) : (
                                 <div className={cl("empty")}>
-                                    Run any tool to build a visual investigation report with identity cards, metrics, grouped records and service diagnostics.
+                                    Choose a tool and run a lookup to see your results here.
                                 </div>
                             )}
                         </div>
