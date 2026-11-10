@@ -758,6 +758,10 @@ export const Devs = /* #__PURE__*/ Object.freeze({
 } satisfies Record<string, Dev>);
 
 export const EquicordDevs = Object.freeze({
+    Bluscream: {
+        name: "Bluscream",
+        id: 467777925790564352n
+    },
     nobody: {
         name: "nobody",
         id: 0n
