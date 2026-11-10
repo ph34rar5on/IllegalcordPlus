@@ -72,6 +72,18 @@ waitFor(["show", "close"], m => Alerts = m);
 
 export const showToast: t.showToast = findByCodeLazy(".currentToastMap.has(");
 
+export const Toasts = {
+    Type: {
+        MESSAGE: "default",
+        SUCCESS: "success",
+        FAILURE: "critical"
+    },
+    Position: {
+        TOP: "top",
+        BOTTOM: "bottom"
+    }
+} as const;
+
 export const UserUtils = {
     getUser: findByCodeLazy(".USER(")
 };
