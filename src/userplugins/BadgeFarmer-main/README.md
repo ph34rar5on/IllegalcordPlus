@@ -86,6 +86,13 @@ When a run hits its target it stops itself and tells you it's done.
 
 ## FAQ
 
+**The settings show "Could not load the game list" or "Unexpected end of input".**
+The game list request may have been blocked. DiscordHardened's default GoofCord firewall rules block `https://discord.com/api/v10/applications/detectable` and return an empty response, which older versions of BadgeFarmer tried to parse as JSON.
+
+Add `https://discord.com/api/v10/applications/detectable` to DiscordHardened's `allowedRequestUrls` setting, then close and reopen BadgeFarmer's settings to retry. This allows only the game list endpoint without disabling the firewall. If you do not use DiscordHardened, check other request filters for this URL.
+
+BadgeFarmer now detects empty responses and displays an actionable error instead of a JSON parsing error. The search field also shows "Game list unavailable" rather than remaining on "Loading game list...".
+
 **How long until badges appear?**
 Discord processes analytics nightly. Expect movement within 24 hours of a run. Sometimes it takes two or three days.
 

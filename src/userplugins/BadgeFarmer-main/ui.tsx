@@ -22,9 +22,13 @@ let cataloguePromise: Promise<DetectableApp[]> | null = null;
 
 export function loadCatalogue(): Promise<DetectableApp[]> {
     cataloguePromise ??= fetch(DETECTABLE_APPS_URL)
-        .then(response => {
+        .then(async response => {
             if (!response.ok) throw new Error(`Discord returned ${response.status}`);
-            return response.json() as Promise<DetectableApp[]>;
+            const text = await response.text();
+            if (!text.trim()) {
+                throw new Error("The game list response was empty. If DiscordHardened is enabled, add https://discord.com/api/v10/applications/detectable to its allowedRequestUrls setting, then reopen these settings.");
+            }
+            return JSON.parse(text) as DetectableApp[];
         })
         .then(apps => apps.filter(app => app.id != null && app.name != null))
         .catch(error => {
@@ -358,7 +362,7 @@ export function BadgeFarmerDashboard(): JSX.Element {
                         setSelected(null);
                     }}
                     disabled={busy || !catalogueReady && catalogueError == null}
-                    placeholder={apps == null ? "Loading game list..." : "Search a game for the Game Time badge"}
+                    placeholder={catalogueError != null ? "Game list unavailable" : apps == null ? "Loading game list..." : "Search a game for the Game Time badge"}
                 />
                 {selected != null && (
                     <div className={cl("game-picked")}>
