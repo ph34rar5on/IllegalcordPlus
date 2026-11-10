@@ -228,10 +228,15 @@ test("Ignores known Discord rejections without hiding other errors or window fai
         openCrashSupportModal: () => calls.push("popup")
     });
     const rateLimited = Object.assign(new Error("Ton nombre d'actions est limité."), { status: 429, retryAfter: 10 });
+    const discordRequestError = "Oops! You've caught an ultra rare error. This is probably our fault, so please try again or check our status page.";
     for (const reason of [
+        new Error(discordRequestError),
+        discordRequestError,
+        { message: discordRequestError, stack: `Error: ${discordRequestError}\n    at ei (https://discord.com/assets/web.48946ead1e279bd2.js:172:259799)` },
         new TypeError("Failed to fetch"),
         "Failed to fetch",
         { message: "Failed to fetch", stack: "TypeError: Failed to fetch" },
+        new Error("could not play audio: asset_404"),
         new Error("Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION"),
         "Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION",
         { message: "Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION", stack: "Error: Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION" },
@@ -249,18 +254,24 @@ test("Ignores known Discord rejections without hiding other errors or window fai
     handleUnhandledRejection({ reason: Object.assign(new Error("Server error"), { status: 500 }) });
     handleUnhandledRejection({ reason: new Error("You are being rate limited.") });
     handleUnhandledRejection({ reason: new Error("Cannot set setting key: OTHER_SETTING") });
+    handleUnhandledRejection({ reason: new Error("could not play audio: another_asset") });
     handleGlobalError({ error: new TypeError("Failed to fetch") });
+    handleGlobalError({ error: new Error("could not play audio: asset_404") });
     handleGlobalError({ error: rateLimited });
     handleGlobalError({ error: new Error("Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION") });
+    handleGlobalError({ error: new Error(discordRequestError) });
     assert.deepEqual(calls, [
         ["unhandled-rejection", "Cannot read properties of undefined"], "save", "log", "popup",
         ["unhandled-rejection", "Failed to fetch user profile"], "save", "log", "popup",
         ["unhandled-rejection", "Server error"], "save", "log", "popup",
         ["unhandled-rejection", "You are being rate limited."], "save", "log", "popup",
         ["unhandled-rejection", "Cannot set setting key: OTHER_SETTING"], "save", "log", "popup",
+        ["unhandled-rejection", "could not play audio: another_asset"], "save", "log", "popup",
         ["window-error", "Failed to fetch"], "save", "log", "popup",
+        ["window-error", "could not play audio: asset_404"], "save", "log", "popup",
         ["window-error", "Ton nombre d'actions est limité."], "save", "log", "popup",
-        ["window-error", "Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION"], "save", "log", "popup"
+        ["window-error", "Cannot set setting key: DESKTOP_FULLSCREEN_POPUP_OCCLUSION"], "save", "log", "popup",
+        ["window-error", discordRequestError], "save", "log", "popup"
     ]);
 });
 
@@ -302,4 +313,60 @@ test("Preserves browser error locations in saved reports and disk logs", () => {
     const log = JSON.parse(buildCrashLogContents(reports.at(-1)));
     assert.equal(log.sourceLocation, undefined);
     assert.ok(!log.reportText.includes("Source:"));
+});
+
+test("Uses upstream module IDs and groups crashes with legacy fingerprints", () => {
+    const start = source.indexOf("function getPatchedModules(");
+    const end = source.indexOf("function isPromiseLike(", start);
+    const allWebpackInstances = new Set([
+        new Map([["123", new Set(["FirstPlugin"])]]),
+        new Map([["123", new Set(["FirstPlugin", "SecondPlugin"])]])
+    ]);
+    const { getPatchedModules, getCrashFingerprint, normalizeCrashSourceIds } = load(source.slice(start, end)
+        + "\nreturn { getPatchedModules, getCrashFingerprint, normalizeCrashSourceIds };", {
+        IS_DEV: true, allWebpackInstances, getFactoryPatchedBy: (id, instance) => instance.get(id)
+    });
+    const frame = id => `    at render (file:///WebpackModule${id}:12:34)`;
+    const stack = `Error: Crash\n${frame("123")}`;
+    assert.deepEqual(getPatchedModules(stack, `${frame("124")}\n${frame("123")}`), [
+        { sourceId: "123", plugins: ["FirstPlugin", "SecondPlugin"] }
+    ]);
+    const fingerprint = getCrashFingerprint("render", "Crash", stack);
+    assert.equal(fingerprint, normalizeCrashSourceIds(`render\nCrash\n${frame("123-Factory4")}`));
+    assert.equal(fingerprint, normalizeCrashSourceIds(`render\nCrash\n${frame("123-Sourceabc123")}`));
+    assert.notEqual(fingerprint, getCrashFingerprint("render", "Crash", `Error: Crash\n${frame("124")}`));
+});
+
+test("Skips stylesheet injection until a popout has a document head", () => {
+    const start = source.indexOf("    patches: [");
+    const end = source.indexOf("\n    handleCrash,", start);
+    const { patches } = load("return {" + source.slice(start, end) + "};", {});
+    const { replacement } = patches.find(patch => patch.find === "Document head was null");
+    const match = new RegExp(replacement.match.source.replaceAll("\\i", "(?:[A-Za-z_$][\\w$]*)"), replacement.match.flags);
+    const code = 'function D(e,t,i){let a=e.document,s=new URL(t).origin,l=new URL(`${window.location.protocol}//${window.location.host}`).origin,o=URL.canParse(n.p)?new URL(n.p).origin:"";if(s!==l&&s!==o)return void p.warn("Not injecting stylesheet, unrecognized origin",s);let d=a.createElement("link");d.href=t,d.rel="stylesheet",d.integrity=i,r()(null!=a.head,"Document head was null"),a.head.appendChild(d)}';
+    const patched = code.replace(match, replacement.replace);
+    assert.notEqual(patched, code);
+    const appended = [];
+    const warnings = [];
+    let created = 0;
+    const inject = load(patched + "\nreturn D;", {
+        URL, window: { location: new URL("https://discord.com/channels/@me") },
+        n: { p: "https://cdn.discordapp.com/assets/" },
+        p: { warn: (...args) => warnings.push(args) },
+        r: () => (condition, message) => assert.ok(condition, message)
+    });
+    const pending = { document: { head: null, createElement: () => { created++; return {}; } } };
+    const ready = { document: { head: { appendChild: link => appended.push(link) }, createElement: pending.document.createElement } };
+    const url = "https://discord.com/assets/popout.css";
+    for (const popout of [pending, ready]) inject(popout, url, "sha256-test");
+    assert.equal(created, 1);
+    assert.deepEqual(appended, [{ href: url, rel: "stylesheet", integrity: "sha256-test" }]);
+    pending.document.head = ready.document.head;
+    inject(pending, url, "sha256-test");
+    assert.equal(appended.length, 2);
+    inject(ready, "https://example.com/untrusted.css", "");
+    assert.equal(appended.length, 2);
+    assert.equal(warnings.length, 1);
+    ready.document.createElement = () => { throw new Error("Unrelated failure"); };
+    assert.throws(() => inject(ready, url, ""), /Unrelated failure/);
 });

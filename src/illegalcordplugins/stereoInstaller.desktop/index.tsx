@@ -7,9 +7,11 @@
 import "./style.css";
 
 import { showNotification } from "@api/Notifications";
+import { isPluginEnabled } from "@api/PluginManager";
 import { definePluginSettings } from "@api/Settings";
 import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
+import { FormSwitch } from "@components/FormSwitch";
 import { Heading } from "@components/Heading";
 import { DeleteIcon, HeadphonesIcon, NoEntrySignIcon, WarningIcon } from "@components/Icons";
 import { Paragraph } from "@components/Paragraph";
@@ -24,8 +26,10 @@ import type { ActionInfo, InstallInfo, NativeResult } from "./native";
 const Native = VencordNative.pluginHelpers.StereoInstaller as PluginNative<typeof import("./native")>;
 const SETTINGS_ENTRY_KEY = "illegalcord_stereo_installer";
 const LOG_RETENTION_RESTARTS = 5;
+const AUTO_INSTALL_KEYS: ["autoStereoInstaller"] = ["autoStereoInstaller"];
 const DISCORD_AUDIO_COLLECTIVE_SOURCE_URL = "https://github.com/ProdHallow/Discord-Stereo-Windows-MacOS-Linux";
 const VOICE_PLAYGROUND_SOURCE_URL = "https://codeberg.org/UnpackedX/Discord-Experimental-Subsystem";
+const VOICE_PLAYGROUND_FILES_URL = "https://github.com/ImHisako/ImHisako/tree/main/Images/StereoMethods";
 const VOICE_PLAYGROUND_TUTORIAL_URL = "https://www.youtube.com/watch?v=zSIIganbZxg";
 
 type InstallerMethod = "method1" | "method2";
@@ -92,6 +96,27 @@ async function maintainInstallerLogs(): Promise<void> {
 
     const result = await Native.clearLogs().catch(() => null);
     settings.store.logRestartCount = result?.success ? 0 : LOG_RETENTION_RESTARTS - 1;
+}
+
+async function checkStereoOnStartup(): Promise<void> {
+    const firstStart = !launchCounted;
+    await maintainInstallerLogs();
+
+    if (firstStart && settings.plain.autoStereoInstaller && isPluginEnabled("StereoInstaller")) {
+        const result = await Native.autoInstall();
+        if (!result.success) {
+            showToast({ text: result.error, variant: "critical" });
+            return;
+        }
+        if (result.data) {
+            settings.store.logRestartCount = 0;
+            showToast({ text: "Discord will restart to restore stereo audio.", variant: "success" });
+            return;
+        }
+    }
+
+    const result = await Native.autoDetect();
+    if (result.success) notifyRepatchIfNeeded(result.data);
 }
 
 function StereoWarning() {
@@ -178,6 +203,7 @@ function LogLine({ entry }: { entry: LogEntry; }) {
 }
 
 function StereoInstallerPanel() {
+    const { autoStereoInstaller } = settings.use(AUTO_INSTALL_KEYS);
     const [root, setRoot] = React.useState("");
     const [info, setInfo] = React.useState<InstallInfo | ActionInfo | null>(null);
     const [status, setStatus] = React.useState("Ready.");
@@ -257,6 +283,7 @@ function StereoInstallerPanel() {
         });
         if (!result) return;
 
+        if (kind === "revert") settings.store.autoStereoInstaller = false;
         settings.store.logRestartCount = 0;
         setInfo(result);
         setStatus("Discord will close now. Check the StereoInstaller log if it does not reopen.");
@@ -273,7 +300,7 @@ function StereoInstallerPanel() {
                     {isMethod2 ? (
                         <>
                             <Paragraph>
-                                This will install the local 512 discord_voice.node and the bundled index.js into the detected discord_voice module.
+                                This will download the 512 discord_voice.node and index.js from GitHub and install them into the detected Discord voice module.
                             </Paragraph>
                             <Paragraph>
                                 Voice Playground Method replaces the local voice module to enable higher audio quality. Use only one method on the same Discord install.
@@ -304,7 +331,7 @@ function StereoInstallerPanel() {
             body: (
                 <div>
                     <Paragraph>
-                        This will copy index.js from StereoMethods/Discord-Voice into the detected discord_voice module.
+                        This will download index.js from GitHub and install it into the detected Discord voice module.
                     </Paragraph>
                     <Paragraph>
                         Discord will close while the file is replaced. Use this only if you are fixing Voice Playground Method files or know you need that index.js.
@@ -354,6 +381,12 @@ function StereoInstallerPanel() {
     return (
         <div className="vc-stereo-installer-root">
             <div className="vc-stereo-installer-controls">
+                <FormSwitch
+                    title="Auto stereo installer"
+                    description={settings.def.autoStereoInstaller.description}
+                    value={autoStereoInstaller}
+                    onChange={value => settings.store.autoStereoInstaller = value}
+                />
                 <div className="vc-stereo-installer-select-grid">
                     <div className="vc-stereo-installer-select-row">
                         <div>
@@ -370,8 +403,8 @@ function StereoInstallerPanel() {
 
                     <div className="vc-stereo-installer-select-row">
                         <div>
-                            <span>Source code</span>
-                            <Paragraph>Each method has its own upstream source.</Paragraph>
+                            <span>Sources and files</span>
+                            <Paragraph>Open the upstream projects or browse the Voice Playground files.</Paragraph>
                         </div>
                         <div className="vc-stereo-installer-warning-actions">
                             <Button
@@ -388,6 +421,13 @@ function StereoInstallerPanel() {
                             >
                                 Voice Playground
                             </Button>
+                            <Button
+                                variant="secondary"
+                                size="small"
+                                onClick={() => VencordNative.native.openExternal(VOICE_PLAYGROUND_FILES_URL)}
+                            >
+                                Stereo files on GitHub
+                            </Button>
                         </div>
                     </div>
                 </div>
@@ -395,7 +435,7 @@ function StereoInstallerPanel() {
                 {installerMethod === "method2" && (
                     <div className="vc-stereo-installer-method2-note">
                         <Paragraph>
-                            Voice Playground Method automatically installs both discord_voice.node and index.js from StereoMethods/Discord-Voice. Do not install both methods on the same client. The separate index.js button remains available for repairs.
+                            Voice Playground Method downloads discord_voice.node and index.js from GitHub before installing them. Use one method per client. The separate index.js button remains available for repairs.
                         </Paragraph>
                         <div className="vc-stereo-installer-warning-actions">
                             <Button
@@ -516,6 +556,12 @@ function StereoInstallerPage() {
 }
 
 const settings = definePluginSettings({
+    autoStereoInstaller: {
+        type: OptionType.BOOLEAN,
+        description: "Restores your last stereo method when Discord starts without stereo. Discord restarts to apply it. Reverting to the backup turns this off.",
+        default: false,
+        hidden: true
+    },
     hideFromToolbox: {
         type: OptionType.BOOLEAN,
         description: "Hide this plugin from Equicord Toolbox.",
@@ -553,9 +599,7 @@ export default definePlugin({
             });
         }
 
-        void maintainInstallerLogs().then(() => Native.autoDetect()).then(result => {
-            if (result.success) notifyRepatchIfNeeded(result.data);
-        }, () => void 0);
+        void checkStereoOnStartup().catch(() => void 0);
     },
 
     stop() {

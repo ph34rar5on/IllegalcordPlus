@@ -6,8 +6,8 @@
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { setImmediate } from "node:timers/promises";
 import { test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import { compileFunction } from "node:vm";
 
 import { transform } from "esbuild";

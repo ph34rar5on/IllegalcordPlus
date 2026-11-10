@@ -204,7 +204,7 @@ test("Blocks external main frame navigation and redirects while allowing Discord
 test("Security switches work independently without identity spoofing or a proxy", async () => {
     for (const [navigation, webviews] of [[true, false], [false, true], [false, false]]) {
         const { sender, configure, blocked } = await fixture();
-        const agent = sender.agent;
+        const { agent } = sender;
         assert.equal(await configure(navigation, webviews), navigation || webviews);
         assert.equal(blocked("will-navigate", "https://attacker.test"), navigation);
         assert.equal(blocked("will-attach-webview"), webviews);

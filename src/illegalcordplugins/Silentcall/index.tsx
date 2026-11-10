@@ -5,7 +5,6 @@
  */
 
 /*
- * Vencord, a Discord client mod
  * SilentGroupCall — start DM/group calls without ringing the other members.
  *
  * When you start a call, Discord's client sends a separate

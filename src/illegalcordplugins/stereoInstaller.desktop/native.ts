@@ -6,11 +6,10 @@
 
 import { VENCORD_USER_AGENT } from "@shared/vencordUserAgent";
 import { spawn } from "child_process";
+import { createHash } from "crypto";
 import { app, dialog, type IpcMainInvokeEvent } from "electron";
-import method512 from "file://StereoMethods/Discord-Voice/(512) discord_voice.node?base64&trim=false";
-import method2Index from "file://StereoMethods/Discord-Voice/index.js?base64&trim=false";
 import { appendFileSync, constants, type Dirent, existsSync, mkdirSync } from "fs";
-import { access, chmod, cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
+import { access, chmod, cp, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import { arch, homedir, platform as osPlatform, release } from "os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "path";
 
@@ -20,6 +19,19 @@ const MAX_DOWNLOAD_BYTES = 160 * 1024 * 1024;
 const MAX_VISIBLE_LOG_LINES = 500;
 const PATCHED_WINDOWS_GITHUB_CONTENTS_API = "https://api.github.com/repos/ProdHallow/Discord-Stereo-Windows-MacOS-Linux/contents/Updates%2FNodes%2FPatched%20Nodes%20%28for%20Installer%29%2FWindows";
 const PATCHED_LINUX_GITHUB_CONTENTS_API = "https://api.github.com/repos/ProdHallow/Discord-Stereo-Windows-MacOS-Linux/contents/Updates%2FNodes%2FPatched%20Nodes%20%28for%20Installer%29%2FLinux";
+const VOICE_PLAYGROUND_URL = "https://raw.githubusercontent.com/ImHisako/ImHisako/28c7057f2242b70e4cd83430c59ddb4212ef7bed/Images/StereoMethods";
+const VOICE_PLAYGROUND_FILES = {
+    "discord_voice.node": {
+        fileName: "(512) discord_voice.node",
+        size: 14_470_072,
+        sha256: "e0dfcd5ef3ef0c2ac8042204be8758e109035c62dfe1ff1465c7697fbf7503e3"
+    },
+    "index.js": {
+        fileName: "index.js",
+        size: 21_718,
+        sha256: "656a4307555ebb6bc3922f8cd14c5f7e6deb8472c262117e71db9ca6a334ca81"
+    }
+};
 
 export interface InstallInfo {
     platformKey: string;
@@ -79,6 +91,13 @@ interface GithubContentFile {
     download_url: string;
 }
 
+interface DownloadOptions {
+    accept?: string;
+    maxBytes?: number;
+    redirect?: RequestRedirect;
+    authenticated?: boolean;
+}
+
 interface RelaunchConfig {
     platformKey: string;
     discordRoot: string;
@@ -99,6 +118,7 @@ interface WorkerConfig {
     activeMethod?: PatchMethod;
     patchClientLabel: string;
     patchBuildLabel: string;
+    patchNodeSha256?: string;
     logPath: string;
     logPaths: string[];
     taskName?: string;
@@ -118,10 +138,13 @@ interface InstallationState {
 interface PatchMeta {
     method: PatchMethod;
     buildLabel: string;
+    nodeSha256: string;
     time: number;
 }
 
 const allowedDiscordRoots = new Set<string>();
+let installActionRunning = false;
+let restartScheduled = false;
 
 class ActionLog {
     public readonly lines: string[] = [];
@@ -218,60 +241,79 @@ export async function clearLogs(_: IpcMainInvokeEvent): Promise<NativeResult<tru
     }
 }
 
-export async function patch(_: IpcMainInvokeEvent, rootPath: string): Promise<NativeResult<ActionInfo>> {
-    const log = new ActionLog();
+export function autoInstall(_: IpcMainInvokeEvent): Promise<NativeResult<boolean>> {
+    return runInstallAction(async log => {
+        const target = await resolveRunningTarget();
+        if (!target) return false;
 
-    try {
-        const target = await targetFromRendererRoot(rootPath);
-        log.info("=== Patch ===");
-        log.info(`Discord root: ${target.discordRoot}`);
-        log.info(`Voice dir: ${target.voiceDir}`);
+        const latestPatch = await latestPatchMeta(target.discordRoot);
+        if (!latestPatch || (latestPatch.method === "voicePlayground" && platformKey() !== "windows")) return false;
 
-        await ensurePermanentUnpatchedBackup(target, log);
-        const patchedVoiceDir = await downloadPatchedPayload(log);
-        const installed = await scheduleWorker("Patch", patchedVoiceDir, target, "discordAudioCollective", log);
-        log.ok(installed ? "Installed Discord Audio Collective Method. Discord will close and reopen." : "Patch scheduled. Discord will close, install Discord Audio Collective Method, then reopen.");
-
-        return ok({ ...await installInfoFromTarget(target), logPath: logPath() }, log.lines);
-    } catch (error) {
-        log.fail(errorMessage(error));
-        return fail(errorMessage(error), log.lines);
-    }
-}
-
-export async function patchMethod2(_: IpcMainInvokeEvent, rootPath: string): Promise<NativeResult<ActionInfo>> {
-    const log = new ActionLog();
-
-    try {
-        const target = await targetFromRendererRoot(rootPath);
-        const methodTarget = await method2Target(target);
-        assertVoicePlaygroundSupported();
-
-        log.info("=== Patch Voice Playground Method ===");
-        log.info(`Discord root: ${methodTarget.discordRoot}`);
-        log.info(`Voice dir: ${methodTarget.voiceDir}`);
-        log.info("Stereo quality: 512");
-
-        if (!await looksLikeDiscordVoiceDir(methodTarget.voiceDir)) {
-            throw new Error(`Voice Playground Method target folder was not found or is incomplete: ${methodTarget.voiceDir}`);
+        const attemptPath = join(dirname(statePathForRoot(target.discordRoot)), "auto_install_attempt");
+        if (await isFile(attemptPath)) {
+            await rm(attemptPath, { force: true });
+            return false;
         }
 
-        await ensurePermanentUnpatchedBackup(methodTarget, log);
-        const patchedVoiceDir = await prepareMethod2Payload(log);
-        await scheduleWorker("Patch", patchedVoiceDir, methodTarget, "voicePlayground", log, "singleFile", "discord_voice.node", true);
-        log.ok("Patch scheduled. Discord will close, install Voice Playground Method with index.js, then reopen.");
+        const installation = await installationState(target, buildLabelFromAppDir(target.appDir));
+        if (installation.status === "installed") return false;
 
-        return ok({ ...await installInfoFromTarget(methodTarget), logPath: logPath() }, log.lines);
-    } catch (error) {
-        log.fail(errorMessage(error));
-        return fail(errorMessage(error), log.lines);
-    }
+        log.info(`Restoring ${PATCH_METHOD_LABELS[latestPatch.method]} at startup.`);
+        await writeFile(attemptPath, "", { flag: "wx" });
+        try {
+            await patchTarget(target, latestPatch.method, log);
+        } catch (error) {
+            await rm(attemptPath, { force: true });
+            throw error;
+        }
+        return true;
+    });
 }
 
-export async function patchMethod2Index(_: IpcMainInvokeEvent, rootPath: string): Promise<NativeResult<ActionInfo>> {
-    const log = new ActionLog();
+export function patch(_: IpcMainInvokeEvent, rootPath: string): Promise<NativeResult<ActionInfo>> {
+    return runInstallAction(async log => {
+        const target = await targetFromRendererRoot(rootPath);
+        await patchTarget(target, "discordAudioCollective", log);
+        return { ...await installInfoFromTarget(target), logPath: logPath() };
+    });
+}
 
-    try {
+export function patchMethod2(_: IpcMainInvokeEvent, rootPath: string): Promise<NativeResult<ActionInfo>> {
+    return runInstallAction(async log => {
+        const target = await targetFromRendererRoot(rootPath);
+        const methodTarget = await method2Target(target);
+        await patchTarget(methodTarget, "voicePlayground", log);
+        return { ...await installInfoFromTarget(methodTarget), logPath: logPath() };
+    });
+}
+
+async function patchTarget(target: Target, method: PatchMethod, log: ActionLog): Promise<void> {
+    const voicePlayground = method === "voicePlayground";
+    if (voicePlayground) assertVoicePlaygroundSupported();
+    log.info(voicePlayground ? "=== Patch Voice Playground Method ===" : "=== Patch ===");
+    log.info(`Discord root: ${target.discordRoot}`);
+    log.info(`Voice dir: ${target.voiceDir}`);
+
+    if (voicePlayground) {
+        log.info("Stereo quality: 512");
+        if (!await looksLikeDiscordVoiceDir(target.voiceDir)) {
+            throw new Error(`Voice Playground Method target folder was not found or is incomplete: ${target.voiceDir}`);
+        }
+        await ensurePermanentUnpatchedBackup(target, log);
+        const patchedVoiceDir = await prepareMethod2Payload(log);
+        await scheduleWorker("Patch", patchedVoiceDir, target, method, log, "singleFile", "discord_voice.node", true);
+        log.ok("Patch scheduled. Discord will close, install Voice Playground Method with index.js, then reopen.");
+        return;
+    }
+
+    await ensurePermanentUnpatchedBackup(target, log);
+    const patchedVoiceDir = await downloadPatchedPayload(log);
+    const installed = await scheduleWorker("Patch", patchedVoiceDir, target, method, log);
+    log.ok(installed ? "Installed Discord Audio Collective Method. Discord will close and reopen." : "Patch scheduled. Discord will close, install Discord Audio Collective Method, then reopen.");
+}
+
+export function patchMethod2Index(_: IpcMainInvokeEvent, rootPath: string): Promise<NativeResult<ActionInfo>> {
+    return runInstallAction(async log => {
         const target = await targetFromRendererRoot(rootPath);
         const methodTarget = await method2Target(target);
         assertVoicePlaygroundSupported();
@@ -285,21 +327,16 @@ export async function patchMethod2Index(_: IpcMainInvokeEvent, rootPath: string)
         }
 
         await ensurePermanentUnpatchedBackup(methodTarget, log);
-        const patchedIndexDir = await prepareMethod2IndexPayload(log);
+        const patchedIndexDir = await prepareMethod2Payload(log, false);
         await scheduleWorker("Patch", patchedIndexDir, methodTarget, undefined, log, "singleFile", "index.js");
         log.ok("Patch scheduled. Discord will close, install index.js, then reopen.");
 
-        return ok({ ...await installInfoFromTarget(methodTarget), logPath: logPath() }, log.lines);
-    } catch (error) {
-        log.fail(errorMessage(error));
-        return fail(errorMessage(error), log.lines);
-    }
+        return { ...await installInfoFromTarget(methodTarget), logPath: logPath() };
+    });
 }
 
-export async function revert(_: IpcMainInvokeEvent, rootPath: string): Promise<NativeResult<ActionInfo>> {
-    const log = new ActionLog();
-
-    try {
+export function revert(_: IpcMainInvokeEvent, rootPath: string): Promise<NativeResult<ActionInfo>> {
+    return runInstallAction(async log => {
         const target = await targetFromRendererRoot(rootPath);
         const backupDir = permanentBackupDir(target);
 
@@ -314,10 +351,22 @@ export async function revert(_: IpcMainInvokeEvent, rootPath: string): Promise<N
         const restored = await scheduleWorker("Revert", backupDir, target, undefined, log);
         log.ok(restored ? "Restored the backup. Discord will close and reopen." : "Revert scheduled. Discord will close, restore the backup, then reopen.");
 
-        return ok({ ...await installInfoFromTarget(target), logPath: logPath() }, log.lines);
+        return { ...await installInfoFromTarget(target), logPath: logPath() };
+    });
+}
+
+async function runInstallAction<T>(action: (log: ActionLog) => Promise<T>): Promise<NativeResult<T>> {
+    if (installActionRunning || restartScheduled) return fail("StereoInstaller is already working.", []);
+
+    installActionRunning = true;
+    const log = new ActionLog();
+    try {
+        return ok(await action(log), log.lines);
     } catch (error) {
         log.fail(errorMessage(error));
         return fail(errorMessage(error), log.lines);
+    } finally {
+        installActionRunning = false;
     }
 }
 
@@ -734,6 +783,21 @@ async function resolveTarget(preferredRoot?: string): Promise<Target | undefined
     return undefined;
 }
 
+async function resolveRunningTarget(): Promise<Target | undefined> {
+    if (platformKey() === "windows") {
+        const exePath = app.getPath("exe");
+        const appDir = dirname(exePath);
+        if (!isDiscordAppDirName(basename(appDir))) return;
+
+        const voiceDir = await findVoiceDirFromAppDir(appDir);
+        if (voiceDir) return { discordRoot: dirname(appDir), voiceDir, appDir, exeName: basename(exePath) };
+    } else if (platformKey() === "linux") {
+        const discordRoot = app.getPath("userData");
+        const { voiceDir, appDir } = await findVoiceDirWithDiagnostics(discordRoot);
+        if (voiceDir) return { discordRoot, voiceDir, appDir, exeName: clientExeForRoot(discordRoot) };
+    }
+}
+
 function clientExeForRoot(root: string): string | undefined {
     const key = platformKey();
     if (key === "windows") return windowsClientExeForRoot(root);
@@ -868,7 +932,12 @@ async function latestPatchMeta(discordRoot: string): Promise<PatchMeta | undefin
         const date = new Date(metaString(meta, "last_patch_utc"));
         const patchTime = Number.isNaN(date.getTime()) ? 0 : date.getTime();
         if (latest && patchTime < latest.time) continue;
-        latest = { method, buildLabel: metaString(meta, "build_label"), time: patchTime };
+        latest = {
+            method,
+            buildLabel: metaString(meta, "build_label"),
+            nodeSha256: metaString(meta, "node_sha256"),
+            time: patchTime
+        };
     }
 
     return latest;
@@ -879,6 +948,18 @@ async function filesEqual(left: string, right: string): Promise<boolean> {
     if ((await stat(left)).size !== (await stat(right)).size) return false;
 
     return (await readFile(left)).equals(await readFile(right));
+}
+
+async function voiceNodeSha256(voiceDir: string): Promise<string> {
+    return createHash("sha256").update(await readFile(join(voiceDir, "discord_voice.node"))).digest("hex");
+}
+
+async function patchedInstallationState(target: Target, method: PatchMethod, currentBuildLabel: string, buildLabel: string, nodeSha256: string): Promise<InstallationState> {
+    if (!currentBuildLabel || !buildLabel || buildLabel !== currentBuildLabel) return { status: "needsReinstall", method };
+
+    if (nodeSha256 && await voiceNodeSha256(target.voiceDir) !== nodeSha256) return { status: "notInstalled", method: null };
+
+    return { status: "installed", method };
 }
 
 async function installationState(target: Target, currentBuildLabel: string): Promise<InstallationState> {
@@ -895,10 +976,7 @@ async function installationState(target: Target, currentBuildLabel: string): Pro
             if (isRecord(state) && state.status === "notInstalled") return { status: "notInstalled", method: null };
             if (isRecord(state) && state.status === "installed" && isPatchMethod(state.active_method)) {
                 const method = state.active_method;
-                const buildLabel = metaString(state, "build_label");
-                return !currentBuildLabel || !buildLabel || buildLabel !== currentBuildLabel
-                    ? { status: "needsReinstall", method }
-                    : { status: "installed", method };
+                return patchedInstallationState(target, method, currentBuildLabel, metaString(state, "build_label"), metaString(state, "node_sha256"));
             }
         } catch {
             return { status: "notInstalled", method: null };
@@ -907,11 +985,7 @@ async function installationState(target: Target, currentBuildLabel: string): Pro
 
     const latestPatch = await latestPatchMeta(target.discordRoot);
     if (!latestPatch) return { status: "notInstalled", method: null };
-    if (!currentBuildLabel || !latestPatch.buildLabel || latestPatch.buildLabel !== currentBuildLabel) {
-        return { status: "needsReinstall", method: latestPatch.method };
-    }
-
-    return { status: "installed", method: latestPatch.method };
+    return patchedInstallationState(target, latestPatch.method, currentBuildLabel, latestPatch.buildLabel, latestPatch.nodeSha256);
 }
 
 function repatchWarning(status: StereoInstallStatus): string {
@@ -981,7 +1055,7 @@ async function clearDirContents(pathValue: string, allowedParent: string): Promi
     }
 }
 
-async function downloadBytes(url: string, timeoutMs: number, accept?: string): Promise<Buffer> {
+async function downloadBytes(url: string, timeoutMs: number, { accept, maxBytes = MAX_DOWNLOAD_BYTES, redirect = "follow", authenticated = true }: DownloadOptions = {}): Promise<Buffer> {
     const parsedUrl = new URL(url);
     if (parsedUrl.protocol !== "https:") throw new Error("Download URL must use HTTPS.");
     if (!["api.github.com", "raw.githubusercontent.com"].includes(parsedUrl.hostname)) {
@@ -998,28 +1072,35 @@ async function downloadBytes(url: string, timeoutMs: number, accept?: string): P
 
     if (accept) headers.Accept = accept;
 
-    const token = (process.env.DISCORD_STEREO_GITHUB_TOKEN || process.env.GITHUB_TOKEN || "").trim();
+    const token = authenticated ? (process.env.DISCORD_STEREO_GITHUB_TOKEN || process.env.GITHUB_TOKEN || "").trim() : "";
     if (token) headers.Authorization = token.startsWith("github_pat_") ? `Bearer ${token}` : `token ${token}`;
 
     try {
         const response = await fetch(parsedUrl, {
             headers,
+            redirect,
             signal: controller.signal
         });
 
         if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
 
         const contentLength = Number(response.headers.get("content-length"));
-        if (Number.isFinite(contentLength) && contentLength > MAX_DOWNLOAD_BYTES) {
+        if (contentLength > maxBytes) {
             throw new Error("Download is too large.");
         }
 
-        const data = Buffer.from(await response.arrayBuffer());
-        if (data.byteLength > MAX_DOWNLOAD_BYTES) throw new Error("Download is too large.");
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        for await (const chunk of response.body ?? []) {
+            size += chunk.byteLength;
+            if (size > maxBytes) throw new Error("Download is too large.");
+            chunks.push(chunk);
+        }
 
-        return data;
+        return Buffer.concat(chunks, size);
     } finally {
         clearTimeout(timeout);
+        controller.abort();
     }
 }
 
@@ -1062,38 +1143,38 @@ async function method2Target(target: Target): Promise<Target> {
     };
 }
 
-async function prepareMethod2Payload(log: ActionLog): Promise<string> {
-    const staging = join(hubDataDir(), "staging", "method2_payload");
-    const voiceFile = join(staging, "discord_voice.node");
-    const indexFile = join(staging, "index.js");
+async function prepareMethod2Payload(log: ActionLog, includeVoice = true): Promise<string> {
+    const staging = join(hubDataDir(), "staging", includeVoice ? "method2_payload" : "method2_index_payload");
     assertPathInside(hubDataDir(), staging);
-    assertPathInside(staging, voiceFile);
-    assertPathInside(staging, indexFile);
+
+    const files: SingleFileName[] = includeVoice ? ["discord_voice.node", "index.js"] : ["index.js"];
+    log.info("Downloading Voice Playground Method files from GitHub.");
+    const payloads = await Promise.all(files.map(async name => {
+        const { fileName, size, sha256 } = VOICE_PLAYGROUND_FILES[name];
+        const data = await downloadBytes(`${VOICE_PLAYGROUND_URL}/${encodeURIComponent(fileName)}`, 120_000, {
+            maxBytes: size,
+            redirect: "error",
+            authenticated: false
+        });
+        if (createHash("sha256").update(data).digest("hex") !== sha256) {
+            throw new Error(`Integrity check failed for ${name}.`);
+        }
+        return [name, data] as const;
+    }));
 
     await mkdir(staging, { recursive: true });
-    await clearDirContents(staging, hubDataDir());
-    await writeFile(voiceFile, Buffer.from(method512, "base64"));
-    await writeFile(indexFile, Buffer.from(method2Index, "base64"));
-    validateDownloadPayload("discord_voice.node", await readFile(voiceFile));
-    validateDownloadPayload("index.js", await readFile(indexFile));
+    const tempDir = await mkdtemp(join(staging, "download-"));
+    try {
+        for (const [name, data] of payloads) {
+            const tempFile = join(tempDir, name);
+            await writeFile(tempFile, data);
+            await rename(tempFile, join(staging, name));
+        }
+    } finally {
+        await rm(tempDir, { recursive: true, force: true });
+    }
 
-    log.ok("Prepared Voice Playground Method payload with index.js: 512.");
-
-    return staging;
-}
-
-async function prepareMethod2IndexPayload(log: ActionLog): Promise<string> {
-    const staging = join(hubDataDir(), "staging", "method2_index_payload");
-    const targetFile = join(staging, "index.js");
-    assertPathInside(hubDataDir(), staging);
-    assertPathInside(staging, targetFile);
-
-    await mkdir(staging, { recursive: true });
-    await clearDirContents(staging, hubDataDir());
-    await writeFile(targetFile, Buffer.from(method2Index, "base64"));
-    validateDownloadPayload("index.js", await readFile(targetFile));
-
-    log.ok("Prepared Voice Playground Method index.js payload.");
+    log.ok(includeVoice ? "Prepared the 512 voice module and index.js." : "Prepared Voice Playground Method index.js.");
 
     return staging;
 }
@@ -1113,7 +1194,7 @@ function assertSafeRemoteFileName(name: string): void {
 }
 
 async function downloadGithubFolderToDir(apiUrl: string, dest: string, log: ActionLog): Promise<void> {
-    const raw = await downloadBytes(apiUrl, 60_000, "application/vnd.github.v3+json");
+    const raw = await downloadBytes(apiUrl, 60_000, { accept: "application/vnd.github.v3+json" });
     const parsed: unknown = JSON.parse(raw.toString("utf8"));
     if (!Array.isArray(parsed)) throw new Error("GitHub contents API returned unexpected JSON.");
 
@@ -1201,6 +1282,7 @@ async function scheduleWorker(actionName: "Patch" | "Revert", sourceDir: string,
         activeMethod: metaMethod,
         patchClientLabel: clientLabelForRoot(target.discordRoot, patchBuildLabel),
         patchBuildLabel,
+        patchNodeSha256: metaMethod ? await voiceNodeSha256(sourceDir) : undefined,
         logPath: logPath(),
         logPaths: logPaths(),
         taskName,
@@ -1243,7 +1325,8 @@ async function scheduleWorker(actionName: "Patch" | "Revert", sourceDir: string,
             await writeFile(config.metaPath, JSON.stringify({
                 last_patch_utc: new Date().toISOString(),
                 client_label: config.patchClientLabel,
-                build_label: config.patchBuildLabel
+                build_label: config.patchBuildLabel,
+                node_sha256: config.patchNodeSha256
             }, null, 2), "utf8");
         }
 
@@ -1252,10 +1335,12 @@ async function scheduleWorker(actionName: "Patch" | "Revert", sourceDir: string,
             status: actionName === "Revert" ? "notInstalled" : "installed",
             build_label: config.patchBuildLabel,
             updated_utc: new Date().toISOString(),
+            node_sha256: config.patchNodeSha256,
             ...(config.activeMethod ? { active_method: config.activeMethod } : {})
         }, null, 2), "utf8");
         log.ok(`${actionName} complete.`);
         app.relaunch();
+        restartScheduled = true;
         setTimeout(() => app.exit(0), 700).unref();
         return true;
     }
@@ -1292,6 +1377,7 @@ async function scheduleWorker(actionName: "Patch" | "Revert", sourceDir: string,
     log.info(`Worker log: ${logPath()}`);
     log.info("Discord exit scheduled so the worker can replace the voice files.");
 
+    restartScheduled = true;
     setTimeout(() => app.exit(0), 700).unref();
     return false;
 }
@@ -1566,6 +1652,7 @@ try {
         $meta = [ordered]@{ last_patch_utc = (Get-Date).ToUniversalTime().ToString("o") }
         if ($config.patchClientLabel) { $meta.client_label = [string] $config.patchClientLabel }
         if ($config.patchBuildLabel) { $meta.build_label = [string] $config.patchBuildLabel }
+        if ($config.patchNodeSha256) { $meta.node_sha256 = [string] $config.patchNodeSha256 }
         $meta | ConvertTo-Json | Set-Content -LiteralPath ([string] $config.metaPath) -Encoding UTF8
         Write-InstallerLog ("Wrote metadata: " + $config.metaPath)
     }
@@ -1576,6 +1663,7 @@ try {
         $stateStatus = if ($config.actionName -eq "Revert") { "notInstalled" } else { "installed" }
         $state = [ordered]@{ status = $stateStatus; build_label = [string] $config.patchBuildLabel; updated_utc = (Get-Date).ToUniversalTime().ToString("o") }
         if ($config.activeMethod) { $state["active_method"] = [string] $config.activeMethod }
+        if ($config.patchNodeSha256) { $state["node_sha256"] = [string] $config.patchNodeSha256 }
         $state | ConvertTo-Json | Set-Content -LiteralPath ([string] $config.statePath) -Encoding UTF8
         Write-InstallerLog ("Wrote installation state: " + $config.statePath)
     }
@@ -1781,6 +1869,7 @@ async function main() {
             const meta = { last_patch_utc: new Date().toISOString() };
             if (config.patchClientLabel) meta.client_label = config.patchClientLabel;
             if (config.patchBuildLabel) meta.build_label = config.patchBuildLabel;
+            if (config.patchNodeSha256) meta.node_sha256 = config.patchNodeSha256;
             await fs.writeFile(config.metaPath, JSON.stringify(meta, null, 2), "utf8");
             await appendLog(config, "Wrote metadata: " + config.metaPath);
         }
@@ -1793,6 +1882,7 @@ async function main() {
                 updated_utc: new Date().toISOString()
             };
             if (config.activeMethod) state.active_method = config.activeMethod;
+            if (config.patchNodeSha256) state.node_sha256 = config.patchNodeSha256;
             await fs.writeFile(config.statePath, JSON.stringify(state, null, 2), "utf8");
             await appendLog(config, "Wrote installation state: " + config.statePath);
         }
