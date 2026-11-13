@@ -1,0 +1,24 @@
+.vc-token-login-container {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.vc-token-login-account {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 16px;
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 8px;
+}
+
+.vc-token-login-token {
+    overflow-wrap: anywhere;
+}
+
+.vc-token-login-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
